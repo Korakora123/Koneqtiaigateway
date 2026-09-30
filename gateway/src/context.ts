@@ -16,6 +16,7 @@ export interface RequestCtx {
   queueMs: number;
   tokensIn: number;
   tokensOut: number;
+  evalMs: number;
   audioSeconds: number;
   chars: number;
   stream: boolean;
@@ -45,6 +46,7 @@ export function newCtx(requestId: string): RequestCtx {
     queueMs: 0,
     tokensIn: 0,
     tokensOut: 0,
+    evalMs: 0,
     audioSeconds: 0,
     chars: 0,
     stream: false,
@@ -57,6 +59,7 @@ export function newCtx(requestId: string): RequestCtx {
 export function usageHeader(ctx: RequestCtx): string {
   const parts: string[] = [];
   if (ctx.tokensIn || ctx.tokensOut) parts.push(`tokens_in=${ctx.tokensIn}`, `tokens_out=${ctx.tokensOut}`);
+  if (ctx.evalMs) parts.push(`eval_ms=${ctx.evalMs}`);
   if (ctx.audioSeconds) parts.push(`audio_seconds=${ctx.audioSeconds.toFixed(2)}`);
   if (ctx.chars) parts.push(`chars=${ctx.chars}`);
   return parts.length ? parts.join(';') : 'none';

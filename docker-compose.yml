@@ -1,0 +1,212 @@
+# koneqti-ai-gateway — Stage 0 stack on the shared CloudPanel server.
+#
+# HARD LIMITS (spec §4, CLAUDE.md rule 2). The per-service limits below add up to
+#   cpus 3.5  ·  mem_limit 6g (6064m)  ·  memswap_limit ≤ 7g (6950m)
+# so the whole AI stack can never use more than that. Do not remove or raise them
+# without the owner's written approval.
+#
+#   ollama   2.60 cpu  4400m ram  5000m ram+swap
+#   speech   0.60 cpu  1024m      1200m
+#   tts      0.20 cpu   384m       450m
+#   gateway  0.10 cpu   256m       300m
+#   ─────────────────────────────────────────
+#   total    3.50 cpu  6064m      6950m
+#
+# All containers: oom_score_adj 800 (kernel kills AI before MySQL/PHP), cpu_shares 256
+# (web wins under contention), processes started with `nice -n 10`, restart unless-stopped.
+#
+# Networks: ollama/speech/tts sit on an `internal` network with NO internet access.
+# Only the gateway is also on `edge`, whose port is published on 127.0.0.1 only.
+# Models/voices are downloaded once with:  docker compose --profile setup run --rm <x>-setup
+
+name: ai-gateway
+
+x-limits: &protect
+  restart: unless-stopped
+  oom_score_adj: 800
+  cpu_shares: 256
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  gateway:
+    <<: *protect
+    build: ./gateway
+    image: koneqti/ai-gateway:local
+    env_file: .env
+    environment:
+      GATEWAY_PORT: "8787"
+      GATEWAY_LISTEN_HOST: 0.0.0.0
+      CONFIG_DIR: /config
+      USAGE_DB_PATH: /data/usage.db
+      OLLAMA_URL: http://ollama:11434
+      SPEECH_URL: http://speech:9001
+      TTS_URL: http://tts:9002
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-8787}:8787"
+    volumes:
+      - ./config:/config:ro
+      - gateway_data:/data
+    depends_on: [ollama, speech, tts]
+    networks: [ai_internal, edge]
+    cpus: 0.10
+    mem_limit: 256m
+    memswap_limit: 300m
+    pids_limit: 128
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  ollama:
+    <<: *protect
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    entrypoint: ["nice", "-n", "10", "/bin/ollama"]
+    command: ["serve"]
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-10m}
+      OLLAMA_MAX_QUEUE: "64"
+      OLLAMA_CONTEXT_LENGTH: ${MAX_CONTEXT_TOKENS:-4096}
+      OLLAMA_NOPRUNE: "1"
+    volumes:
+      - ollama_models:/root/.ollama
+    networks: [ai_internal]
+    cpus: 2.60
+    mem_limit: 4400m
+    memswap_limit: 5000m
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "/bin/ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  speech:
+    <<: *protect
+    build: ./services/speech
+    image: koneqti/ai-speech:local
+    environment:
+      WHISPER_MODEL: small
+      WHISPER_COMPUTE_TYPE: int8
+      WHISPER_THREADS: "2"
+      WHISPER_MODEL_DIR: /models
+      HF_HUB_OFFLINE: "1"
+      LOG_LEVEL: ${SERVICE_LOG_LEVEL:-INFO}
+    volumes:
+      - whisper_models:/models
+    networks: [ai_internal]
+    cpus: 0.60
+    mem_limit: 1024m
+    memswap_limit: 1200m
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9001/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  tts:
+    <<: *protect
+    build: ./services/tts
+    image: koneqti/ai-tts:local
+    environment:
+      VOICES_DIR: /voices
+      TTS_LANGUAGES_FILE: /config/tts_languages.yaml
+      TTS_THREADS: "1"
+      TTS_MAX_LOADED_VOICES: "2"
+      LOG_LEVEL: ${SERVICE_LOG_LEVEL:-INFO}
+    volumes:
+      - ./config:/config:ro
+      - tts_voices:/voices
+    networks: [ai_internal]
+    cpus: 0.20
+    mem_limit: 384m
+    memswap_limit: 450m
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9002/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # One-shot downloaders (profile "setup"). These are the ONLY containers that
+  # reach the internet, and only to fetch model weights / voices.
+  # ---------------------------------------------------------------------------
+  ollama-setup:
+    profiles: ["setup"]
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /bin/ollama serve >/dev/null 2>&1 &
+        sleep 4
+        /bin/ollama pull ${OLLAMA_MODEL:-qwen3:4b} && /bin/ollama list
+    environment:
+      OLLAMA_HOST: 127.0.0.1:11434
+    volumes:
+      - ollama_models:/root/.ollama
+    networks: [setup]
+    cpus: 1.0
+    mem_limit: 1g
+    oom_score_adj: 800
+
+  speech-setup:
+    profiles: ["setup"]
+    build: ./services/speech
+    image: koneqti/ai-speech:local
+    command: ["python", "-m", "app.download"]
+    environment:
+      WHISPER_MODEL: small
+      WHISPER_MODEL_DIR: /models
+    volumes:
+      - whisper_models:/models
+    networks: [setup]
+    cpus: 1.0
+    mem_limit: 1g
+    oom_score_adj: 800
+
+  tts-setup:
+    profiles: ["setup"]
+    build: ./services/tts
+    image: koneqti/ai-tts:local
+    command: ["python", "-m", "app.download"]
+    volumes:
+      - ./config:/config:ro
+      - tts_voices:/voices
+    networks: [setup]
+    cpus: 1.0
+    mem_limit: 512m
+    oom_score_adj: 800
+
+  # Stage 2 only (GPU). Kept here, disabled, so the move from mesgai-brain is visible.
+  # voice-clone:
+  #   profiles: ["stage2"]
+  #   build: ./services/voice-clone
+
+networks:
+  ai_internal:
+    internal: true          # no route to the internet (acceptance test 9)
+  edge:
+    ipam:
+      config:
+        - subnet: ${AI_EDGE_SUBNET:-172.31.87.0/24}   # host reaches the gateway from 172.31.87.1
+  setup: {}
+
+volumes:
+  gateway_data:
+  ollama_models:
+  whisper_models:
+  tts_voices:

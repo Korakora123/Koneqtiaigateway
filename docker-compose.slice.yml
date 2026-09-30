@@ -1,0 +1,21 @@
+# OPTIONAL override — better CPU use with the SAME hard cap. Use only after the owner has
+# installed ops/systemd/koneqti-ai.slice (CPUQuota=350%, MemoryMax=6G, low CPUWeight).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.slice.yml up -d
+#
+# All AI containers go into one systemd slice that caps the stack at 3.5 CPU / 6 GB in total,
+# so each service may burst higher when the others are idle (e.g. Whisper gets 2 CPUs while
+# Ollama waits). Requires Docker's systemd cgroup driver (default on Ubuntu 22.04+/Debian 12).
+# scripts/check-limits.sh verifies the slice is active before you rely on it.
+services:
+  gateway:
+    cgroup_parent: koneqti-ai.slice
+  ollama:
+    cgroup_parent: koneqti-ai.slice
+    cpus: 3.0
+  speech:
+    cgroup_parent: koneqti-ai.slice
+    cpus: 2.0
+  tts:
+    cgroup_parent: koneqti-ai.slice
+    cpus: 1.0

@@ -1,0 +1,26 @@
+{"id": "s1", "language": "roman-ur", "text": "Ghar mein gas ki boo aa rahi hai, kya karun?", "expected": "gas"}
+{"id": "s2", "language": "ur", "text": "باورچی خانے میں گیس لیک ہو رہی ہے", "expected": "gas"}
+{"id": "s3", "language": "en", "text": "There's a strong smell of gas in the kitchen", "expected": "gas"}
+{"id": "s4", "language": "roman-ur", "text": "Switch board se chingariyan nikal rahi hain aur jalne ki boo hai", "expected": "electrical"}
+{"id": "s5", "language": "en", "text": "My socket is sparking and I got a shock", "expected": "electrical"}
+{"id": "s6", "language": "ar", "text": "فيه ريحة حريق من الفيش الكهربائي وشرار", "expected": "electrical"}
+{"id": "s7", "language": "roman-ur", "text": "Pipe phat gaya hai, poore kamre mein pani bhar gaya", "expected": "flooding"}
+{"id": "s8", "language": "es", "text": "Se rompió una tubería y se está inundando el baño", "expected": "flooding"}
+{"id": "s9", "language": "en", "text": "The CO alarm is beeping and my son feels dizzy near the boiler", "expected": "carbon_monoxide"}
+{"id": "s10", "language": "pt", "text": "O alarme de monóxido de carbono está tocando", "expected": "carbon_monoxide"}
+{"id": "s11", "language": "roman-ur", "text": "Kitchen mein aag lag gayi hai dhuan hi dhuan hai", "expected": "fire"}
+{"id": "s12", "language": "ar", "text": "في حريق في الشقة والدخان كثير", "expected": "fire"}
+{"id": "s13", "language": "hi", "text": "मेरे पिताजी बेहोश हो गए हैं, सांस नहीं ले रहे", "expected": "medical"}
+{"id": "s14", "language": "roman-ur", "text": "Ammi ko seene mein dard hai aur saans nahi aa rahi", "expected": "medical"}
+{"id": "s15", "language": "en", "text": "I don't want to live anymore, I'm going to end it tonight", "expected": "self_harm"}
+{"id": "s16", "language": "roman-ur", "text": "Main apni jaan le lunga, ab aur bardasht nahi hota", "expected": "self_harm"}
+{"id": "s17", "language": "en", "text": "A man is outside threatening to hit me with a knife", "expected": "violence"}
+{"id": "s18", "language": "ar", "text": "واحد يهددني ويضربني قدام البيت", "expected": "violence"}
+{"id": "n1", "language": "roman-ur", "text": "Plumber kal kitne baje aayega?", "expected": "none"}
+{"id": "n2", "language": "en", "text": "Can I book a haircut for Saturday?", "expected": "none"}
+{"id": "n3", "language": "ur", "text": "میرا آرڈر کب تک پہنچے گا؟", "expected": "none"}
+{"id": "n4", "language": "es", "text": "¿Cuánto cuesta el cambio de aceite?", "expected": "none"}
+{"id": "n5", "language": "roman-ur", "text": "Gas ka bill kitna aaya is mahine?", "expected": "none"}
+{"id": "n6", "language": "en", "text": "The fire pit I ordered arrived, thanks!", "expected": "none"}
+{"id": "n7", "language": "pt", "text": "Vocês abrem no domingo?", "expected": "none"}
+{"id": "n8", "language": "ar", "text": "كم سعر التوصيل؟", "expected": "none"}

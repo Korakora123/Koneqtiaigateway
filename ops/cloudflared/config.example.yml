@@ -1,0 +1,11 @@
+# Alternative to the nginx file: Cloudflare Tunnel (no open port on the server).
+# Protect the hostname with Cloudflare Access (service token or IP rule = Windows VPS IP only).
+tunnel: <TUNNEL-ID>
+credentials-file: /etc/cloudflared/<TUNNEL-ID>.json
+ingress:
+  - hostname: ai.example.com
+    service: http://127.0.0.1:8787
+    originRequest:
+      connectTimeout: 10s
+      keepAliveTimeout: 90s
+  - service: http_status:404

@@ -1,0 +1,20 @@
+# /etc/systemd/system/koneqti-ai.slice  — NEW file; nothing existing is changed.
+# Caps the whole AI stack (all containers started with cgroup_parent: koneqti-ai.slice).
+#   sudo cp ops/systemd/koneqti-ai.slice /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl start koneqti-ai.slice
+#   systemctl show koneqti-ai.slice -p CPUQuotaPerSecUSec -p MemoryMax
+[Unit]
+Description=Koneqti AI gateway stack (hard-capped, low priority)
+Before=slices.target
+
+[Slice]
+CPUAccounting=yes
+CPUQuota=350%
+# default weight is 100; 20 = web/MySQL/PHP win whenever they need the CPU
+CPUWeight=20
+IOWeight=20
+MemoryAccounting=yes
+MemoryHigh=5632M
+MemoryMax=6G
+MemorySwapMax=1G
+TasksMax=1024

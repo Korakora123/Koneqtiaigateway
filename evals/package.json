@@ -1,0 +1,11 @@
+{
+  "name": "koneqti-ai-evals",
+  "private": true,
+  "type": "module",
+  "description": "Model evals through the gateway: language match, facts adherence, JSON validity, latency, WER, safety recall",
+  "scripts": {
+    "eval": "node run.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=20" }
+}

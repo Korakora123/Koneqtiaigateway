@@ -38,6 +38,8 @@ export interface OllamaResult {
   doneReason: string;
   tokensIn: number;
   tokensOut: number;
+  /** Pure generation time reported by Ollama (eval_duration) — used by bench/ for eval rate. */
+  evalMs: number;
 }
 
 /** Removes a leading Qwen3 `<think>…</think>` block if the runtime still emits one. */
@@ -128,6 +130,7 @@ export class OllamaClient {
       doneReason: data.done_reason ?? 'stop',
       tokensIn: data.prompt_eval_count ?? 0,
       tokensOut: data.eval_count ?? 0,
+      evalMs: Math.round((data.eval_duration ?? 0) / 1e6),
     };
   }
 

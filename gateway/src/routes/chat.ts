@@ -158,6 +158,7 @@ export async function runChat(req: FastifyRequest, deps: Deps, task: ResolvedTas
   const ctx = req.ctx;
   ctx.tokensIn = out.tokensIn;
   ctx.tokensOut = out.tokensOut;
+  ctx.evalMs = out.evalMs;
   if (prepared.wantsJson) checkJsonOutput(out.content, prepared.schema);
   return {
     content: out.content,
@@ -227,6 +228,7 @@ export function registerChat(app: FastifyInstance, deps: Deps): void {
             if (tail) chunk({ content: tail }, null);
             ctx.tokensIn = c.prompt_eval_count ?? 0;
             ctx.tokensOut = c.eval_count ?? 0;
+            ctx.evalMs = Math.round((c.eval_duration ?? 0) / 1e6);
             chunk({}, c.done_reason === 'length' ? 'length' : 'stop');
             if (body.stream_options?.include_usage) {
               sse({ id, object: 'chat.completion.chunk', created, model, choices: [], usage: usageObj(ctx.tokensIn, ctx.tokensOut) });
