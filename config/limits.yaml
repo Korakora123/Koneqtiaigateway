@@ -1,0 +1,34 @@
+# Queue, timeout and rate-limit settings. Hardware-dependent: revisit per stage.
+
+pools:
+  # Concurrent jobs sent to each backend. llm must equal OLLAMA_NUM_PARALLEL.
+  llm:    { slots: 2, max_queue: { realtime: 16, interactive: 16, batch: 32 } }   # total ≤ OLLAMA_MAX_QUEUE (64)
+  speech: { slots: 1, max_queue: { realtime: 8,  interactive: 8,  batch: 16 } }
+  tts:    { slots: 1, max_queue: { realtime: 8,  interactive: 8,  batch: 16 } }
+
+defaults:
+  timeout_ms:                 # used when a task has no timeout_ms
+    realtime: 25000
+    interactive: 30000
+    batch: 1800000            # 30 min: batch may wait for the off-peak window / an empty realtime queue
+  # First guess of a job's run time per pool before real measurements exist (EWMA takes over).
+  initial_service_ms: { llm: 8000, speech: 6000, tts: 1500 }
+
+batch:
+  # Outside the off-peak window, batch runs only when no realtime job is queued or running,
+  # and uses at most this many slots so a realtime request always finds one free.
+  peak_max_concurrent: 1
+
+rate_limits:
+  # Per product (all its tenants together) and per tenant inside a product.
+  default_product: { requests_per_min: 600, concurrent: 24 }
+  default_tenant:  { requests_per_min: 60,  concurrent: 4 }
+  products:
+    # mesgai: { requests_per_min: 900, concurrent: 32 }
+  tenants:
+    # "mesgai:big-customer-id": { requests_per_min: 120, concurrent: 6 }
+
+request:
+  max_body_bytes: 1048576      # JSON bodies
+  max_audio_bytes: 26214400    # 25 MB voice notes
+  max_tts_chars: 1500

@@ -1,0 +1,13 @@
+# Instruction used by POST /v1/safety/classify. This is a generic *classifier* definition,
+# not a safety decision: the gateway only returns {category, score}. What to do with the
+# score (emergency scripts, keyword filter, thresholds) stays in each product.
+categories: [medical, self_harm, violence, gas, electrical, flooding, carbon_monoxide, fire, none]
+system_prompt: |
+  You are a safety classifier. Read the customer message (any language, including Roman Urdu,
+  Urdu, Arabic, Hindi, English, Spanish, Portuguese) and return JSON only:
+  {"category": <one of: medical, self_harm, violence, gas, electrical, flooding, carbon_monoxide, fire, none>,
+   "score": <0.0-1.0 likelihood that the message describes a real, current emergency or risk in that category>}
+  medical = injury, illness, someone unwell or in danger to health. self_harm = suicide or self-injury.
+  violence = threats, assault, abuse. gas = gas smell or leak. electrical = sparks, shocks, burning wires.
+  flooding = water leaks, burst pipes, flooding. carbon_monoxide = CO alarm, fumes, dizziness near a boiler.
+  fire = fire or smoke. none = no risk. Pick the single most likely category.

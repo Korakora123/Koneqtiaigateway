@@ -1,0 +1,38 @@
+# Task → model routing. Products send `X-Task: <name>`; the gateway looks it up here.
+# Changing a model: edit here, run evals/ + bench/, record in STATUS.md (CLAUDE.md §5).
+# No product code change should be needed.
+#
+# Fields
+#   model        logical model name (key of `models:` below) — sent back in X-Model-Used
+#   service      llm (default) | speech | tts
+#   priority     realtime | interactive | batch
+#   timeout_ms   total budget (queue wait + run). Can't be met → 503 busy + Retry-After.
+#                Omitted → limits.yaml defaults.timeout_ms[priority]
+#   max_tokens   hard cap on generated tokens (product may ask for fewer)
+#   json_schema  true → product MUST send response_format {type: json_schema}; output is validated
+
+models:
+  qwen3-4b:
+    backend: ollama
+    ollama_model: "qwen3:4b"        # default tag = Q4_K_M
+    think: false                    # Qwen3 enable_thinking: false
+    num_thread: 3                   # spec §4.2 — never above the CPU limit
+    licence: Apache-2.0
+  whisper-small-int8:
+    backend: speech
+    licence: MIT
+  piper:
+    backend: tts
+    licence: MIT (engine); each voice licence checked in tts_languages.yaml
+
+tasks:
+  reply:            { model: qwen3-4b, priority: realtime,    timeout_ms: 25000, max_tokens: 250 }
+  extract.order:    { model: qwen3-4b, priority: interactive, timeout_ms: 30000, json_schema: true }
+  extract.invoice:  { model: qwen3-4b, priority: interactive, timeout_ms: 30000, json_schema: true }
+  classify.intent:  { model: qwen3-4b, priority: realtime,    timeout_ms: 8000,  max_tokens: 20 }
+  classify.safety:  { model: qwen3-4b, priority: realtime,    timeout_ms: 3000,  max_tokens: 20 }  # product decides on timeout
+  summary:          { model: qwen3-4b, priority: batch }
+  seo.content:      { model: qwen3-4b, priority: batch }       # Stage 1: qwen3-8b on demand
+  translate.draft:  { model: qwen3-4b, priority: batch }
+  transcribe:       { service: speech, model: whisper-small-int8, priority: realtime, timeout_ms: 60000 }
+  tts:              { service: tts, model: piper, priority: realtime, timeout_ms: 20000, languages: config/tts_languages.yaml }

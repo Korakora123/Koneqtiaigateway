@@ -1,0 +1,22 @@
+# Text-to-speech languages (Piper, Stage 0). Unsupported language → 422 tts_language_unavailable.
+#
+# !! Check every voice's licence in its MODEL_CARD (huggingface.co/rhasspy/piper-voices)
+# !! before enabling it for commercial use. Set `licence_checked: true` only after reading it.
+# !! Never use: XTTS-v2, F5-TTS weights, Meta MMS-TTS, Fish Speech weights.
+#
+# mode: native        → speak the text with `voice`
+#       transliterate → convert script first (`transliterate: ur-deva` = Urdu → Devanagari) then use `voice`
+#
+# Voices are downloaded by `docker compose --profile setup run --rm tts-setup`.
+voice_base_url: "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
+
+languages:
+  en: { voice: en_US-lessac-medium,  mode: native, enabled: true, licence_checked: false }
+  hi: { voice: hi_IN-pratham-medium, mode: native, enabled: true, licence_checked: false }
+  # No suitable licensed Piper Urdu voice found → Hindi voice + Urdu→Devanagari transliteration.
+  ur: { voice: hi_IN-pratham-medium, mode: transliterate, transliterate: ur-deva, enabled: true, licence_checked: false }
+  ar: { voice: ar_JO-kareem-medium,  mode: native, enabled: true, licence_checked: false }
+  es: { voice: es_ES-davefx-medium,  mode: native, enabled: true, licence_checked: false }
+  pt: { voice: pt_BR-faber-medium,   mode: native, enabled: true, licence_checked: false }
+  tr: { voice: tr_TR-dfki-medium,    mode: native, enabled: true, licence_checked: false }
+  # Roman Urdu: no TTS in Stage 0 (products send text reply).
