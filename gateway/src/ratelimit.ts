@@ -8,8 +8,9 @@ interface Counter {
 }
 
 /**
- * Per-product and per-tenant limits: requests/minute (fixed 60 s window) and concurrent requests.
- * In-memory — Stage 0 runs a single gateway process.
+ * Per-tenant (product) and per-subtenant (business) limits: requests/minute (fixed 60 s window)
+ * and concurrent requests. A business over its limit gets 429 `subtenant_limit`; other
+ * businesses keep working. In-memory — Stage 0 runs a single gateway process.
  */
 export class RateLimiter {
   private readonly counters = new Map<string, Counter>();
@@ -18,12 +19,6 @@ export class RateLimiter {
     private readonly cfg: LimitsFile['rate_limits'],
     private readonly now: () => number = Date.now,
   ) {}
-
-  private limitFor(kind: 'product' | 'tenant', key: string): RateLimit {
-    return kind === 'product'
-      ? (this.cfg.products[key] ?? this.cfg.default_product)
-      : (this.cfg.tenants[key] ?? this.cfg.default_tenant);
-  }
 
   private counter(key: string): Counter {
     const t = this.now();
@@ -39,20 +34,25 @@ export class RateLimiter {
     return c;
   }
 
-  /** Reserves one request for product + tenant. Returns a release function (idempotent). */
-  enter(product: string, tenant: string): () => void {
-    const checks = [
-      { key: `p:${product}`, limit: this.limitFor('product', product), who: 'product' },
-      { key: `t:${product}:${tenant}`, limit: this.limitFor('tenant', `${product}:${tenant}`), who: 'tenant' },
+  /** Reserves one request for tenant + subtenant. Returns a release function (idempotent). */
+  enter(tenant: string, subtenant: string): () => void {
+    const checks: Array<{ key: string; limit: RateLimit; code: string; who: string }> = [
+      { key: `t:${tenant}`, limit: this.cfg.tenants[tenant] ?? this.cfg.default_tenant, code: 'tenant_limit', who: 'tenant' },
+      {
+        key: `s:${tenant}:${subtenant}`,
+        limit: this.cfg.subtenants[`${tenant}:${subtenant}`] ?? this.cfg.default_subtenant,
+        code: 'subtenant_limit',
+        who: 'subtenant',
+      },
     ];
-    for (const { key, limit, who } of checks) {
+    for (const { key, limit, code, who } of checks) {
       const c = this.counter(key);
       if (c.count >= limit.requests_per_min) {
         const retry = Math.ceil((60_000 - (this.now() - c.windowStart)) / 1000);
-        throw new GatewayError(429, 'rate_limited', `${who} request rate limit reached`, Math.max(1, retry));
+        throw new GatewayError(429, code, `${who} request rate limit reached`, Math.max(1, retry));
       }
       if (c.concurrent >= limit.concurrent) {
-        throw new GatewayError(429, 'too_many_concurrent', `${who} concurrent request limit reached`, 1);
+        throw new GatewayError(429, code, `${who} concurrent request limit reached`, 1);
       }
     }
     const held = checks.map(({ key }) => {
@@ -69,7 +69,7 @@ export class RateLimiter {
     };
   }
 
-  /** Drops idle counters so memory stays bounded with many tenants. */
+  /** Drops idle counters so memory stays bounded with many businesses. */
   sweep(): void {
     const t = this.now();
     for (const [k, c] of this.counters) if (c.concurrent === 0 && t - c.windowStart >= 120_000) this.counters.delete(k);

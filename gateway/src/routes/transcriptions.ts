@@ -49,7 +49,8 @@ export function registerTranscriptions(app: FastifyInstance, deps: Deps): void {
       language: result.language,
       language_probability: result.language_probability,
       confidence: result.confidence,
-      duration: result.duration,
+      duration_sec: result.duration,
+      duration: result.duration, // v0 name, kept for existing callers
     };
     return reply.send(format === 'verbose_json' ? { task: 'transcribe', ...base, segments: result.segments ?? [] } : base);
   });

@@ -28,12 +28,19 @@ from app.translit import TRANSLITERATORS
 log = logging.getLogger("tts")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format='{"ts":"%(asctime)s","level":"%(levelname)s","msg":%(message)s}')
 
-CONTENT_TYPES = {"wav": "audio/wav", "mp3": "audio/mpeg", "ogg": "audio/ogg", "opus": "audio/ogg"}
+CONTENT_TYPES = {
+    "wav": "audio/wav",
+    "mp3": "audio/mpeg",
+    "ogg_opus": "audio/ogg",  # WhatsApp voice note
+    "mulaw_8k": "audio/basic",  # raw G.711 µ-law, 8 kHz mono (phone)
+    "pcm_16k": "audio/L16; rate=16000; channels=1",  # raw signed 16-bit little-endian, 16 kHz mono
+}
+FORMAT_ALIASES = {"ogg": "ogg_opus", "opus": "ogg_opus"}  # v0 names
 FFMPEG_ARGS = {
     "mp3": ["-c:a", "libmp3lame", "-b:a", "48k", "-f", "mp3"],
-    # WhatsApp voice notes: Opus in Ogg, mono.
-    "ogg": ["-c:a", "libopus", "-b:a", "24k", "-application", "voip", "-f", "ogg"],
-    "opus": ["-c:a", "libopus", "-b:a", "24k", "-application", "voip", "-f", "ogg"],
+    "ogg_opus": ["-c:a", "libopus", "-b:a", "24k", "-application", "voip", "-f", "ogg"],
+    "mulaw_8k": ["-ar", "8000", "-c:a", "pcm_mulaw", "-f", "mulaw"],
+    "pcm_16k": ["-ar", "16000", "-c:a", "pcm_s16le", "-f", "s16le"],
 }
 
 
@@ -145,8 +152,11 @@ def create_app(
         lang = s.languages.get(req.language.lower())
         if not lang:
             raise HTTPException(422, detail={"code": "tts_language_unavailable", "message": f"no voice for {req.language}"})
-        if req.format not in CONTENT_TYPES:
-            raise HTTPException(400, detail={"code": "unsupported_format", "message": "format must be wav, mp3, ogg or opus"})
+        fmt = FORMAT_ALIASES.get(req.format, req.format)
+        if fmt not in CONTENT_TYPES:
+            raise HTTPException(
+                400, detail={"code": "unsupported_format", "message": "format must be ogg_opus, mp3, mulaw_8k, pcm_16k or wav"}
+            )
         if len(req.text) > s.max_chars:
             raise HTTPException(413, detail={"code": "text_too_long", "message": f"text longer than {s.max_chars}"})
         voice_name = lang["voice"]
@@ -166,14 +176,14 @@ def create_app(
             wav_bytes = synth(voice, text, req.speed)
         seconds = wav_seconds(wav_bytes)
         try:
-            audio = encoder(wav_bytes, req.format)
+            audio = encoder(wav_bytes, fmt)
         except Exception:
             raise HTTPException(500, detail={"code": "encode_failed", "message": "audio encoding failed"})
         jlog(event="synthesized", language=req.language, voice=voice_name, chars=len(req.text), audio_s=round(seconds, 2),
-             format=req.format, ms=int((time.monotonic() - started) * 1000))
+             format=fmt, ms=int((time.monotonic() - started) * 1000))
         return Response(
             content=audio,
-            media_type=CONTENT_TYPES[req.format],
+            media_type=CONTENT_TYPES[fmt],
             headers={"x-audio-seconds": f"{seconds:.2f}", "x-voice": voice_name},
         )
 

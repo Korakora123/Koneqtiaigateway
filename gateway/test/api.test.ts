@@ -28,7 +28,7 @@ describe('access control', () => {
     expect(hr.statusCode).toBe(403);
   });
 
-  it('400 when X-Tenant-Id is missing on work endpoints', async () => {
+  it('400 when x-kq-subtenant is missing on work endpoints', async () => {
     h = await harness();
     const r = await h.app.inject({
       method: 'POST',
@@ -37,7 +37,7 @@ describe('access control', () => {
       payload: { messages: [{ role: 'user', content: 'hi' }] },
     });
     expect(r.statusCode).toBe(400);
-    expect(r.json().error.code).toBe('tenant_required');
+    expect(r.json().error.code).toBe('subtenant_required');
   });
 
   it('unknown task → 400; task on the wrong endpoint → 400', async () => {
@@ -83,8 +83,10 @@ describe('POST /v1/chat/completions', () => {
     expect(sent.options.num_ctx).toBe(4096);
     expect(sent.options.num_thread).toBe(3);
 
-    const rows = h.deps.usage.summary('mesgai', 0);
-    expect(rows).toEqual([expect.objectContaining({ task: 'reply', model: 'qwen3-4b', requests: 1, tokens_in: 30, tokens_out: 20 })]);
+    const rows = h.deps.usage.byTask('mesgai', 0, Date.now() + 1, 'biz-001');
+    expect(rows).toEqual({ reply: expect.objectContaining({ calls: 1, tokens: 50, tokens_in: 30, tokens_out: 20 }) });
+    expect(r.headers['x-kq-usage-tokens']).toBe('50');
+    expect(r.headers['x-kq-model']).toBe('qwen3-4b');
 
     expect(h.logs.text).toContain('"task":"reply"');
     expect(h.logs.text).not.toContain('SECRET-PROMPT-MARKER');
@@ -114,7 +116,7 @@ describe('POST /v1/chat/completions', () => {
     expect(text).toBe('Ji haan, zaroor.');
     expect(parsed.at(-1).usage.total_tokens).toBe(59);
     await new Promise((res) => setTimeout(res, 20));
-    expect(h.deps.usage.summary('mesgai', 0)[0]).toMatchObject({ tokens_out: 17 });
+    expect(h.deps.usage.byTask('mesgai', 0, Date.now() + 1).reply).toMatchObject({ tokens_out: 17 });
   });
 
   it('extract.order requires a json_schema and returns schema-valid JSON (acceptance 5)', async () => {
@@ -167,19 +169,18 @@ describe('POST /v1/chat/completions', () => {
     expect(r.json().error.code).toBe('busy');
     expect(Number(r.headers['retry-after'])).toBeGreaterThanOrEqual(1);
     expect(r.headers['x-model-used']).toBe('qwen3-4b');
-    expect(h.deps.usage.summary('mesgai', 0)[0]).toMatchObject({ busy: 1 });
+    expect(h.deps.usage.byTask('mesgai', 0, Date.now() + 1)['classify.intent']).toMatchObject({ busy: 1 });
   });
 
   it('full queue → 503 busy for the overflow, every other request answered', async () => {
     h = await harness({ OLLAMA_NUM_PARALLEL: '1' });
-    h.deps.files.limits.pools.llm.max_queue.realtime = 2;
     // pools are built from config at startup — rebuild the llm pool with the small queue
     const { PriorityPool } = await import('../src/queue/pool.js');
     h.deps.pools.llm.close();
     h.deps.pools.llm = new PriorityPool({
       name: 'llm',
       slots: 1,
-      maxQueue: { realtime: 2, interactive: 2, batch: 2 },
+      maxQueue: { normal: 2, batch: 2 },
       initialServiceMs: 10,
       peakMaxBatch: 1,
       isOffPeak: () => false,
@@ -189,7 +190,7 @@ describe('POST /v1/chat/completions', () => {
       h.app.inject({
         method: 'POST',
         url: '/v1/chat/completions',
-        headers: authHeaders('reply', { 'x-tenant-id': `t${i}` }),
+        headers: authHeaders('reply', { 'x-kq-subtenant': `t${i}` }),
         payload: { messages: [{ role: 'user', content: 'x' }] },
       }),
     );
@@ -197,22 +198,35 @@ describe('POST /v1/chat/completions', () => {
     expect(codes).toEqual([200, 200, 200, 503, 503]);
   });
 
-  it('X-Priority can lower but not raise priority', async () => {
+  it('x-kq-priority overrides the task default; legacy X-Priority interactive = normal', async () => {
     h = await harness();
-    await h.app.inject({
-      method: 'POST',
-      url: '/v1/chat/completions',
-      headers: authHeaders('summary', { 'x-priority': 'realtime' }),
-      payload: { messages: [{ role: 'user', content: 'x' }] },
-    });
-    await h.app.inject({
-      method: 'POST',
-      url: '/v1/chat/completions',
-      headers: authHeaders('reply', { 'x-priority': 'batch' }),
-      payload: { messages: [{ role: 'user', content: 'x' }] },
-    });
-    const rows = h.deps.usage.summary('mesgai', 0);
-    expect(rows.map((r) => r.task).sort()).toEqual(['reply', 'summary']);
+    const send = (task: string, extra: Record<string, string>) =>
+      h.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: authHeaders(task, extra), payload: { messages: [{ role: 'user', content: 'x' }] } });
+    expect((await send('reply', { 'x-kq-priority': 'batch' })).statusCode).toBe(200);
+    expect((await send('reply', { 'x-priority': 'interactive' })).statusCode).toBe(200);
+    expect((await send('reply', { 'x-kq-priority': 'urgent' })).json().error.code).toBe('invalid_priority');
+    expect(h.logs.text).toContain('"priority":"batch"');
+    expect(h.logs.text).toContain('"priority":"normal"');
+  });
+
+  it('realtime turn gets 503 at once when no worker is free (never queued)', async () => {
+    h = await harness();
+    h.ollama.handler = ollamaReply('ok', { delayMs: 300 });
+    const send = (sub: string, extra: Record<string, string> = {}) =>
+      h.app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: authHeaders('reply', { 'x-kq-subtenant': sub, ...extra }),
+        payload: { messages: [{ role: 'user', content: 'x' }] },
+      });
+    const busyOnes = [send('a'), send('b')]; // fill both llm slots
+    await new Promise((r) => setTimeout(r, 30));
+    const t0 = Date.now();
+    const rt = await send('c', { 'x-kq-priority': 'realtime' });
+    expect(rt.statusCode).toBe(503);
+    expect(rt.headers['retry-after']).toBe('1');
+    expect(Date.now() - t0).toBeLessThan(150);
+    await Promise.all(busyOnes);
   });
 
   it('rejects prompts that exceed MAX_CONTEXT_TOKENS', async () => {
@@ -227,13 +241,23 @@ describe('POST /v1/chat/completions', () => {
     expect(r.json().error.code).toBe('context_length_exceeded');
   });
 
-  it('per-tenant concurrency limit → 429', async () => {
+  it('per-business concurrency limit → 429 subtenant_limit, other businesses unaffected', async () => {
     h = await harness();
     h.ollama.handler = ollamaReply('ok', { delayMs: 200 });
     const one = () =>
       h.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: authHeaders('reply'), payload: { messages: [{ role: 'user', content: 'x' }] } });
-    const codes = (await Promise.all([one(), one(), one(), one(), one()])).map((r) => r.statusCode);
-    expect(codes.filter((c) => c === 429).length).toBeGreaterThanOrEqual(1);
+    const other = () =>
+      h.app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: authHeaders('reply', { 'x-kq-subtenant': 'biz-002' }),
+        payload: { messages: [{ role: 'user', content: 'x' }] },
+      });
+    const res = await Promise.all([one(), one(), one(), one(), one(), other()]);
+    const limited = res.filter((r) => r.statusCode === 429);
+    expect(limited.length).toBeGreaterThanOrEqual(1);
+    expect(limited[0]!.json().error.code).toBe('subtenant_limit');
+    expect(res.at(-1)!.statusCode).toBe(200);
   });
 });
 
@@ -260,7 +284,15 @@ describe('audio', () => {
       payload,
     });
     expect(r.statusCode).toBe(200);
-    expect(r.json()).toEqual({ text: 'SECRET-TRANSCRIPT', language: 'ur', language_probability: 0.93, confidence: 0.81, duration: 4.2 });
+    expect(r.json()).toEqual({
+      text: 'SECRET-TRANSCRIPT',
+      language: 'ur',
+      language_probability: 0.93,
+      confidence: 0.81,
+      duration_sec: 4.2,
+      duration: 4.2,
+    });
+    expect(r.headers['x-kq-usage-audio-sec']).toBe('4.20');
     expect(r.headers['x-model-used']).toBe('whisper-small-int8');
     expect(r.headers['x-usage']).toBe('audio_seconds=4.20');
     expect(h.logs.text).not.toContain('SECRET-TRANSCRIPT');
@@ -278,7 +310,7 @@ describe('audio', () => {
     h.tts.handler = (req, body, res) => {
       if (req.url !== '/synthesize') return json(res, 200, { ok: true });
       const b = JSON.parse(body.toString()) as { language: string; voice: string; format: string };
-      expect(b).toMatchObject({ language: 'ur', voice: 'hi_IN-pratham-medium', format: 'ogg' });
+      expect(b).toMatchObject({ language: 'ur', voice: 'hi_IN-pratham-medium', format: 'ogg_opus' });
       res.writeHead(200, { 'content-type': 'audio/ogg', 'x-audio-seconds': '1.5', 'x-voice': b.voice }).end(Buffer.from('OggS'));
     };
     const r = await h.app.inject({
@@ -291,6 +323,25 @@ describe('audio', () => {
     expect(r.headers['content-type']).toBe('audio/ogg');
     expect(r.headers['x-model-used']).toBe('piper');
     expect(r.rawPayload.toString()).toBe('OggS');
+    expect(r.headers['x-kq-usage-audio-sec']).toBe('1.50');
+  });
+
+  it('TTS: BCP-47 tags, new format names, cloned/foreign voices, stream', async () => {
+    h = await harness();
+    const seen: Array<{ language: string; format: string }> = [];
+    h.tts.handler = (req, body, res) => {
+      if (req.url !== '/synthesize') return json(res, 200, { ok: true });
+      seen.push(JSON.parse(body.toString()) as { language: string; format: string });
+      res.writeHead(200, { 'content-type': 'audio/basic', 'x-audio-seconds': '1' }).end(Buffer.from([0xff]));
+    };
+    const say = (payload: Record<string, unknown>) => h.app.inject({ method: 'POST', url: '/v1/audio/speech', headers: authHeaders(), payload });
+    expect((await say({ input: 'مرحبا', language: 'ar-EG', format: 'mulaw_8k' })).statusCode).toBe(200);
+    expect(seen.at(-1)).toMatchObject({ language: 'ar', format: 'mulaw_8k' });
+    expect((await say({ input: 'x', language: 'en', format: 'pcm_16k' })).statusCode).toBe(200);
+    // Roman Urdu has no voice: never read by the Urdu-script voice → 422, product sends text
+    expect((await say({ input: 'Aap ka order', language: 'ur-Latn' })).json().error.code).toBe('tts_language_unavailable');
+    expect((await say({ input: 'x', language: 'en', voice: 'v_9a1c' })).statusCode).toBe(404);
+    expect((await say({ input: 'x', language: 'en', stream: true })).statusCode).toBe(501);
   });
 });
 
@@ -349,6 +400,77 @@ describe('other endpoints', () => {
     const m = await h.app.inject({ method: 'GET', url: '/v1/models', headers: { authorization: authHeaders().authorization! } });
     expect(m.json().data.map((d: { id: string }) => d.id)).toContain('qwen3-4b');
     const u = await h.app.inject({ method: 'GET', url: '/v1/usage', headers: { authorization: `Bearer ${KEY2}` } });
-    expect(u.json()).toMatchObject({ product: 'tokofy', rows: [] });
+    expect(u.json()).toMatchObject({ tenant: 'tokofy', by_task: {} });
+  });
+});
+
+describe('tenant / subtenant contract (master §11.1, handover §0–1)', () => {
+  it('tenant comes from the key: X-Tenant-Id must match it, else 403', async () => {
+    h = await harness();
+    const r = await h.app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: authHeaders('reply', { 'x-tenant-id': 'tokofy' }),
+      payload: { messages: [{ role: 'user', content: 'x' }] },
+    });
+    expect(r.statusCode).toBe(403);
+    expect(r.json().error.code).toBe('tenant_mismatch');
+    const noHeader = { ...authHeaders('reply') };
+    delete noHeader['x-tenant-id'];
+    const ok = await h.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: noHeader, payload: { messages: [{ role: 'user', content: 'x' }] } });
+    expect(ok.statusCode).toBe(200);
+  });
+
+  it("echoes the caller's X-Request-Id", async () => {
+    h = await harness();
+    const r = await h.app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: authHeaders('reply', { 'x-request-id': 'mesgai-msg-123' }),
+      payload: { messages: [{ role: 'user', content: 'x' }] },
+    });
+    expect(r.headers['x-request-id']).toBe('mesgai-msg-123');
+  });
+
+  it('usage per subtenant with from/to; totals without subtenant; scoped to the key', async () => {
+    h = await harness();
+    const send = (sub: string) =>
+      h.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: authHeaders('reply', { 'x-kq-subtenant': sub }), payload: { messages: [{ role: 'user', content: 'x' }] } });
+    await send('biz-a');
+    await send('biz-a');
+    await send('biz-b');
+    const today = new Date().toISOString().slice(0, 10);
+    const auth = { authorization: authHeaders().authorization! };
+    const a = await h.app.inject({ method: 'GET', url: `/v1/usage?subtenant=biz-a&from=${today}&to=${today}`, headers: auth });
+    expect(a.json()).toMatchObject({ tenant: 'mesgai', subtenant: 'biz-a', by_task: { reply: { calls: 2, tokens: 118 } } });
+    const all = await h.app.inject({ method: 'GET', url: '/v1/usage', headers: auth });
+    expect(all.json().by_task.reply.calls).toBe(3);
+    const other = await h.app.inject({ method: 'GET', url: '/v1/usage?subtenant=biz-a', headers: { authorization: `Bearer ${KEY2}` } });
+    expect(other.json().by_task).toEqual({});
+  });
+
+  it('subtenant settings and data delete', async () => {
+    h = await harness();
+    const auth = { authorization: authHeaders().authorization!, 'content-type': 'application/json' };
+    await h.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: authHeaders('reply', { 'x-kq-subtenant': 'biz-z' }), payload: { messages: [{ role: 'user', content: 'x' }] } });
+    const g0 = await h.app.inject({ method: 'GET', url: '/v1/subtenants/biz-z/settings', headers: auth });
+    expect(g0.json()).toMatchObject({ retention_days: 0, allow_cache: true, known: true }); // auto-created on first use
+    const put = await h.app.inject({ method: 'PUT', url: '/v1/subtenants/biz-z/settings', headers: auth, payload: { retention_days: 7, allow_cache: false } });
+    expect(put.json()).toEqual({ ok: true });
+    expect((await h.app.inject({ method: 'GET', url: '/v1/subtenants/biz-z/settings', headers: auth })).json()).toMatchObject({ retention_days: 7, allow_cache: false });
+    expect((await h.app.inject({ method: 'PUT', url: '/v1/subtenants/biz-z/settings', headers: auth, payload: { retention_days: -1 } })).statusCode).toBe(400);
+    // another tenant can't see or delete it
+    const tok = { authorization: `Bearer ${KEY2}` };
+    expect((await h.app.inject({ method: 'GET', url: '/v1/subtenants/biz-z/settings', headers: tok })).json().known).toBe(false);
+    const del = await h.app.inject({ method: 'DELETE', url: '/v1/subtenants/biz-z/data', headers: { authorization: auth.authorization } });
+    expect(del.json()).toMatchObject({ ok: true, removed: { usage_rows: 1 } });
+    expect(h.deps.usage.byTask('mesgai', 0, Date.now() + 1, 'biz-z')).toEqual({});
+    expect((await h.app.inject({ method: 'GET', url: '/v1/subtenants/biz-z/settings', headers: auth })).json().known).toBe(false);
+  });
+
+  it('safety text over 1000 chars → 413', async () => {
+    h = await harness();
+    const r = await h.app.inject({ method: 'POST', url: '/v1/safety/classify', headers: authHeaders(), payload: { text: 'a'.repeat(1001) } });
+    expect(r.statusCode).toBe(413);
   });
 });

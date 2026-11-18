@@ -133,7 +133,8 @@ export async function harness(envOver: Record<string, string> = {}, now?: () => 
 
 export const authHeaders = (task?: string, extra: Record<string, string> = {}): Record<string, string> => ({
   authorization: `Bearer ${KEY}`,
-  'x-tenant-id': 'biz-001',
+  'x-tenant-id': 'mesgai',
+  'x-kq-subtenant': 'biz-001',
   ...(task ? { 'x-task': task } : {}),
   ...extra,
 });

@@ -35,7 +35,7 @@ const readJsonl = (f) =>
 const headers = (task) => ({
   authorization: `Bearer ${KEY}`,
   'content-type': 'application/json',
-  'x-tenant-id': 'evals',
+  'x-kq-subtenant': 'evals',
   ...(task ? { 'x-task': task } : {}),
 });
 
@@ -156,7 +156,7 @@ if (ONLY.has('voice')) {
     form.append('file', new Blob([readFileSync(path)]), it.file);
     const res = await fetch(`${URL_}/v1/audio/transcriptions`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${KEY}`, 'x-tenant-id': 'evals' },
+      headers: { authorization: `Bearer ${KEY}`, 'x-kq-subtenant': 'evals' },
       body: form,
     });
     if (!res.ok) {

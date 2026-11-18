@@ -2,10 +2,11 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Deps } from '../deps.js';
 import { resolveTask } from '../context.js';
+import { GatewayError } from '../errors.js';
 import { prepareChat, runChat } from './chat.js';
 
 const SafetyBody = z.object({
-  text: z.string().min(1).max(4000),
+  text: z.string().min(1),
   language: z.string().max(16).optional(),
 });
 
@@ -27,6 +28,8 @@ export function registerSafety(app: FastifyInstance, deps: Deps): void {
 
   app.post('/v1/safety/classify', async (req, reply) => {
     const body = SafetyBody.parse(req.body);
+    const max = deps.files.limits.request.max_safety_chars;
+    if (body.text.length > max) throw new GatewayError(413, 'text_too_long', `text is longer than ${max} characters`);
     const task = resolveTask(req, deps, { fixedTask: 'classify.safety', service: 'llm' });
     const userText = body.language ? `[language: ${body.language}]\n${body.text}` : body.text;
     const prepared = prepareChat(

@@ -54,7 +54,7 @@ def test_transcribe_returns_text_language_confidence():
         assert b["language"] == "ur"
         assert b["language_probability"] == 0.91
         assert 0 < b["confidence"] <= 1
-        assert b["duration"] == 4.0
+        assert b["duration"] == 4.0  # gateway also returns it as duration_sec
         assert "segments" not in b
 
 

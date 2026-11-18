@@ -24,17 +24,59 @@ export function registerModels(app: FastifyInstance, deps: Deps): void {
   });
 }
 
+const DAY = 86_400_000;
+const dateOrTs = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/, 'expected YYYY-MM-DD or ISO time')
+  .transform((v) => Date.parse(v.length === 10 ? `${v}T00:00:00Z` : v));
+
 const UsageQuery = z.object({
-  since_hours: z.coerce.number().positive().max(24 * 90).default(24),
-  tenant: z.string().max(128).optional(),
+  subtenant: z.string().max(128).optional(),
+  /** Inclusive start date (UTC). Default: 30 days ago. */
+  from: dateOrTs.optional(),
+  /** Inclusive end date (UTC; a plain date counts the whole day). Default: now. */
+  to: z.string().optional(),
+  /** Legacy (v0): last N hours. */
+  since_hours: z.coerce.number().positive().max(24 * 400).optional(),
 });
 
-/** A product can read aggregated usage for its own tenants only. */
+/**
+ * Usage per business (handover §1.5): `GET /v1/usage?subtenant=<id>&from=2026-11-01&to=2026-11-30`.
+ * Only the calling tenant's own rows; `subtenant` omitted → totals for the whole tenant.
+ */
 export function registerUsage(app: FastifyInstance, deps: Deps): void {
   app.get('/v1/usage', async (req) => {
     const q = UsageQuery.parse(req.query);
     const product = req.ctx.product!;
-    const since = Date.now() - q.since_hours * 3_600_000;
-    return { product, since: new Date(since).toISOString(), rows: deps.usage.summary(product, since, q.tenant) };
+    const now = Date.now();
+    let to = now;
+    if (q.to) {
+      const t = dateOrTs.parse(q.to);
+      to = q.to.length === 10 ? t + DAY : t; // whole end day
+    }
+    const from = q.from ?? (q.since_hours ? now - q.since_hours * 3_600_000 : to - 30 * DAY);
+    const subtenant = q.subtenant ?? req.ctx.subtenant ?? undefined;
+    const rows = deps.usage.byTask(product, from, to, subtenant);
+    const by_task = Object.fromEntries(
+      Object.entries(rows).map(([task, r]) => [
+        task,
+        {
+          calls: r.calls,
+          ...(r.tokens ? { tokens: r.tokens, tokens_in: r.tokens_in, tokens_out: r.tokens_out } : {}),
+          ...(r.audio_sec ? { audio_sec: r.audio_sec } : {}),
+          ...(r.chars ? { chars: r.chars } : {}),
+          errors: r.errors,
+          busy: r.busy,
+          avg_latency_ms: r.avg_latency_ms,
+        },
+      ]),
+    );
+    return {
+      tenant: product,
+      subtenant: subtenant ?? null,
+      from: new Date(from).toISOString(),
+      to: new Date(to).toISOString(),
+      by_task,
+    };
   });
 }

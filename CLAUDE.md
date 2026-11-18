@@ -68,12 +68,14 @@ Never commit secrets; `.env.example` only.
 4. No product code change should be needed.
 
 ## 6. Behaviour rules
-- Priority: realtime > interactive > batch. Batch only in off-peak window or when
-  realtime queue is empty.
+- Priority: realtime > normal > batch. Realtime (live calls) is never queued: free worker or
+  `503` at once. Batch yields to normal (off-peak window, or when no normal job waits).
 - If a request can't meet its timeout → `503 busy` + `Retry-After`. Never drop silently.
 - Unsupported TTS language → `422 tts_language_unavailable`.
 - Voices endpoints → `501 not_available_until_gpu` in Stage 0.
-- Every response sets `X-Model-Used`, `X-Queue-Ms`, `X-Usage`, `X-Request-Id`.
+- Tenant comes from the API key only; business = `x-kq-subtenant`. Never mix businesses' data.
+- Every response sets `X-Model-Used`, `X-Queue-Ms`, `X-Usage`, `X-Request-Id` (+ `x-kq-model`,
+  `x-kq-usage-tokens`, `x-kq-usage-audio-sec`).
 
 ## 7. Definition of done (every task)
 - Types pass, tests pass, `docker compose up` works with limits in place.

@@ -47,7 +47,7 @@ async function reply(prompt, tenant = 'bench') {
     headers: {
       authorization: `Bearer ${KEY}`,
       'content-type': 'application/json',
-      'x-tenant-id': tenant,
+      'x-kq-subtenant': tenant,
       'x-task': 'reply',
     },
     body: JSON.stringify({ messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: prompt }], max_tokens: 150 }),

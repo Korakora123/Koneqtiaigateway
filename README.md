@@ -6,6 +6,8 @@ Tokofy, e-invoice, BlogBot, PinForge). Local models only: no external AI APIs.
 - Spec: [`KONEQTI_AI_GATEWAY.md`](KONEQTI_AI_GATEWAY.md) · Rules: [`CLAUDE.md`](CLAUDE.md)
 - State, tests, benchmarks, gaps: [`STATUS.md`](STATUS.md)
 - Deploying to the VPS: [`DEPLOY.md`](DEPLOY.md)
+- Master upgrade spec + gap audit: [`KONEQTI_GATEWAY_MASTER.md`](KONEQTI_GATEWAY_MASTER.md) · [`GATEWAY_AUDIT.md`](GATEWAY_AUDIT.md)
+- MesgAI contract: [`MESGAI_GATEWAY_HANDOVER.md`](MESGAI_GATEWAY_HANDOVER.md)
 
 ```
 Windows VPS (brains) ──nginx allowlist / CF tunnel──► gateway :8787 (127.0.0.1 only)
@@ -18,7 +20,7 @@ Windows VPS (brains) ──nginx allowlist / CF tunnel──► gateway :8787 (1
 ## Calling it (from a product)
 ```bash
 curl https://ai.example.com:8443/v1/chat/completions \
-  -H "Authorization: Bearer $AI_GATEWAY_KEY" -H "X-Tenant-Id: biz-123" -H "X-Task: reply" \
+  -H "Authorization: Bearer $AI_GATEWAY_KEY" -H "x-kq-subtenant: biz-123" -H "X-Task: reply" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"system","content":"<product prompt + facts>"},{"role":"user","content":"Kal plumber aa sakta hai?"}],"max_tokens":200}'
 ```
@@ -27,7 +29,7 @@ Or with the SDK (`sdk/`, `@koneqti/ai`):
 import { KoneqtiAI, BusyError } from '@koneqti/ai';
 const ai = new KoneqtiAI(); // AI_GATEWAY_URL, AI_GATEWAY_KEY
 try {
-  const { text } = await ai.chat('reply', { messages }, { tenant: businessId });
+  const { text } = await ai.chat('reply', { messages }, { subtenant: businessId });
 } catch (e) {
   if (e instanceof BusyError) sendHoldingReply(); // product-owned fallback
 }

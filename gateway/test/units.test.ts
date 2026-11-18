@@ -15,7 +15,7 @@ function mkPool(o: Partial<ConstructorParameters<typeof PriorityPool>[0]> = {}):
   return new PriorityPool({
     name: 'llm',
     slots: 2,
-    maxQueue: { realtime: 4, interactive: 4, batch: 4 },
+    maxQueue: { normal: 4, batch: 4 },
     initialServiceMs: 100,
     peakMaxBatch: 1,
     isOffPeak: () => false,
@@ -24,23 +24,50 @@ function mkPool(o: Partial<ConstructorParameters<typeof PriorityPool>[0]> = {}):
 }
 
 describe('PriorityPool', () => {
-  it('serves realtime before interactive before batch (FIFO inside a priority)', async () => {
+  it('serves fast normal, then normal (FIFO), then batch', async () => {
     const pool = mkPool({ slots: 1, isOffPeak: () => true });
-    const first = await pool.acquire({ priority: 'interactive', deadline: far() });
+    const first = await pool.acquire({ priority: 'normal', deadline: far() });
     const order: string[] = [];
-    const take = (name: string, priority: 'realtime' | 'interactive' | 'batch'): Promise<void> =>
-      pool.acquire({ priority, deadline: far() }).then((l) => {
+    const take = (name: string, priority: 'normal' | 'batch', fast = false): Promise<void> =>
+      pool.acquire({ priority, deadline: far(), fast }).then((l) => {
         order.push(name);
         l.release();
       });
-    const all = Promise.all([take('b1', 'batch'), take('i1', 'interactive'), take('r1', 'realtime'), take('r2', 'realtime')]);
+    const all = Promise.all([take('b1', 'batch'), take('n1', 'normal'), take('f1', 'normal', true), take('n2', 'normal'), take('f2', 'normal', true)]);
     first.release();
     await all;
-    expect(order).toEqual(['r1', 'r2', 'i1', 'b1']);
+    expect(order).toEqual(['f1', 'f2', 'n1', 'n2', 'b1']);
     pool.close();
   });
 
-  it('holds batch at peak while realtime is waiting, and caps batch concurrency', async () => {
+  it('realtime never queues: reserved slot, else a free general slot, else 503 at once', async () => {
+    const pool = mkPool({ slots: 1, reservedRealtime: 1 });
+    const n = await pool.acquire({ priority: 'normal', deadline: far() }); // general slot busy
+    const r1 = await pool.acquire({ priority: 'realtime', deadline: far() }); // reserved
+    const t0 = Date.now();
+    const err = await pool.acquire({ priority: 'realtime', deadline: far() }).catch((e: GatewayError) => e);
+    expect(Date.now() - t0).toBeLessThan(50);
+    expect((err as GatewayError).status).toBe(503);
+    expect((err as GatewayError).retryAfterSec).toBe(1);
+    // normal can never take the reserved slot
+    r1.release();
+    let started = false;
+    const n2 = pool.acquire({ priority: 'normal', deadline: far() }).then((l) => {
+      started = true;
+      return l;
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(started).toBe(false);
+    n.release();
+    (await n2).release();
+    // with the general slot free, realtime takes it even without a reservation
+    const p0 = mkPool({ slots: 1, reservedRealtime: 0 });
+    (await p0.acquire({ priority: 'realtime', deadline: far() })).release();
+    pool.close();
+    p0.close();
+  });
+
+  it('holds batch at peak while normal is waiting, and caps batch concurrency', async () => {
     const pool = mkPool({ slots: 2, isOffPeak: () => false, peakMaxBatch: 1 });
     const b1 = await pool.acquire({ priority: 'batch', deadline: far() });
     let b2Started = false;
@@ -50,13 +77,13 @@ describe('PriorityPool', () => {
     });
     await new Promise((r) => setTimeout(r, 20));
     expect(b2Started).toBe(false); // one slot free, but peak cap = 1 batch
-    const r1 = await pool.acquire({ priority: 'realtime', deadline: far() });
-    expect(pool.stats().running.realtime).toBe(1);
+    const n1 = await pool.acquire({ priority: 'normal', deadline: far() });
+    expect(pool.stats().running.normal).toBe(1);
     b1.release();
     await new Promise((r) => setTimeout(r, 20));
     expect(b2Started).toBe(true);
     (await b2).release();
-    r1.release();
+    n1.release();
     pool.close();
   });
 
@@ -71,10 +98,10 @@ describe('PriorityPool', () => {
   });
 
   it('503 busy when the queue for a priority is full', async () => {
-    const pool = mkPool({ slots: 1, maxQueue: { realtime: 1, interactive: 1, batch: 1 } });
-    const held = await pool.acquire({ priority: 'realtime', deadline: far() });
-    const queued = pool.acquire({ priority: 'realtime', deadline: far() });
-    const err = await pool.acquire({ priority: 'realtime', deadline: far() }).catch((e: unknown) => e);
+    const pool = mkPool({ slots: 1, maxQueue: { normal: 1, batch: 1 } });
+    const held = await pool.acquire({ priority: 'normal', deadline: far() });
+    const queued = pool.acquire({ priority: 'normal', deadline: far() });
+    const err = await pool.acquire({ priority: 'normal', deadline: far() }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GatewayError);
     expect((err as GatewayError).status).toBe(503);
     expect((err as GatewayError).retryAfterSec).toBeGreaterThanOrEqual(1);
@@ -85,18 +112,18 @@ describe('PriorityPool', () => {
 
   it('503 busy (not silent drop) when the deadline passes while queued', async () => {
     const pool = mkPool({ slots: 1, initialServiceMs: 1 });
-    const held = await pool.acquire({ priority: 'realtime', deadline: far() });
-    const err = await pool.acquire({ priority: 'realtime', deadline: Date.now() + 50 }).catch((e: unknown) => e);
+    const held = await pool.acquire({ priority: 'normal', deadline: far() });
+    const err = await pool.acquire({ priority: 'normal', deadline: Date.now() + 50 }).catch((e: unknown) => e);
     expect((err as GatewayError).code).toBe('busy');
-    expect(pool.stats().queued.realtime).toBe(0);
+    expect(pool.stats().queued.normal).toBe(0);
     held.release();
     pool.close();
   });
 
   it('rejects up front when the estimated wait exceeds the timeout', async () => {
     const pool = mkPool({ slots: 1, initialServiceMs: 10_000 });
-    const held = await pool.acquire({ priority: 'realtime', deadline: far() });
-    const err = await pool.acquire({ priority: 'realtime', deadline: Date.now() + 3000 }).catch((e: unknown) => e);
+    const held = await pool.acquire({ priority: 'normal', deadline: far() });
+    const err = await pool.acquire({ priority: 'normal', deadline: Date.now() + 3000 }).catch((e: unknown) => e);
     expect((err as GatewayError).status).toBe(503);
     held.release();
     pool.close();
@@ -104,12 +131,12 @@ describe('PriorityPool', () => {
 
   it('removes a waiter when the client aborts', async () => {
     const pool = mkPool({ slots: 1 });
-    const held: Lease = await pool.acquire({ priority: 'realtime', deadline: far() });
+    const held: Lease = await pool.acquire({ priority: 'normal', deadline: far() });
     const ac = new AbortController();
-    const p = pool.acquire({ priority: 'realtime', deadline: far(), signal: ac.signal }).catch((e: GatewayError) => e.code);
+    const p = pool.acquire({ priority: 'normal', deadline: far(), signal: ac.signal }).catch((e: GatewayError) => e.code);
     ac.abort();
     expect(await p).toBe('client_closed');
-    expect(pool.stats().queued.realtime).toBe(0);
+    expect(pool.stats().queued.normal).toBe(0);
     held.release();
     pool.close();
   });
@@ -150,24 +177,32 @@ describe('auth', () => {
 });
 
 describe('rate limiter', () => {
-  it('enforces per-tenant rpm and concurrency, and per-product totals', () => {
+  it('per-subtenant rpm/concurrency → subtenant_limit; tenant totals → tenant_limit', () => {
     let t = 0;
     const rl = new RateLimiter(
       {
-        default_product: { requests_per_min: 3, concurrent: 10 },
-        default_tenant: { requests_per_min: 2, concurrent: 1 },
-        products: {},
+        default_tenant: { requests_per_min: 3, concurrent: 10 },
+        default_subtenant: { requests_per_min: 2, concurrent: 1 },
         tenants: {},
+        subtenants: {},
       },
       () => t,
     );
+    const code = (fn: () => unknown): string | undefined => {
+      try {
+        fn();
+      } catch (e) {
+        return (e as GatewayError).code;
+      }
+      return undefined;
+    };
     const r1 = rl.enter('p', 'a');
-    expect(() => rl.enter('p', 'a')).toThrow(/concurrent/);
+    expect(code(() => rl.enter('p', 'a'))).toBe('subtenant_limit'); // concurrent
     r1();
     rl.enter('p', 'a')();
-    expect(() => rl.enter('p', 'a')).toThrow(/rate limit/);
-    rl.enter('p', 'b')();
-    expect(() => rl.enter('p', 'c')).toThrow(/product request rate/);
+    expect(code(() => rl.enter('p', 'a'))).toBe('subtenant_limit'); // rpm
+    rl.enter('p', 'b')(); // other business unaffected
+    expect(code(() => rl.enter('p', 'c'))).toBe('tenant_limit');
     t += 60_000;
     expect(() => rl.enter('p', 'a')()).not.toThrow();
   });
@@ -188,8 +223,10 @@ describe('think filter', () => {
 describe('config', () => {
   it('loads the repo config files and keeps the spec task table', () => {
     const f = loadFileConfig(CONFIG_DIR);
-    expect(f.tasks.tasks.reply).toMatchObject({ model: 'qwen3-4b', priority: 'realtime', timeout_ms: 25000, max_tokens: 250 });
-    expect(f.tasks.tasks['classify.safety']).toMatchObject({ timeout_ms: 3000, max_tokens: 20 });
+    expect(f.tasks.tasks.reply).toMatchObject({ model: 'qwen3-4b', priority: 'normal', timeout_ms: 25000, max_tokens: 250 });
+    expect(f.tasks.tasks['classify.safety']).toMatchObject({ timeout_ms: 1500, max_tokens: 20, fast: true });
+    expect(f.tasks.tasks.transcribe?.timeout_ms).toBe(60000);
+    expect(f.limits.defaults.timeout_ms.realtime).toBe(2000);
     expect(f.tasks.tasks['extract.order']?.json_schema).toBe(true);
     expect(f.tasks.tasks.summary?.priority).toBe('batch');
     expect(f.tasks.models['qwen3-4b']?.think).toBe(false);
@@ -199,5 +236,28 @@ describe('config', () => {
   it('rejects malformed PRODUCT_KEYS', () => {
     expect(() => loadEnv({ PRODUCT_KEYS: '{"a":"plaintext"}' })).toThrow(/PRODUCT_KEYS/);
     expect(loadEnv({}).GATEWAY_BIND).toBe('127.0.0.1');
+  });
+});
+
+describe('usage store migration', () => {
+  it('renames the v0 `tenant` column to `subtenant` and keeps rows', async () => {
+    const { mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const Database = (await import('better-sqlite3')).default;
+    const { UsageStore } = await import('../src/usage.js');
+    const path = join(mkdtempSync(join(tmpdir(), 'kq-')), 'usage.db');
+    const old = new Database(path);
+    old.exec(`CREATE TABLE usage (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, request_id TEXT NOT NULL,
+      product TEXT NOT NULL, tenant TEXT NOT NULL, task TEXT NOT NULL, model TEXT NOT NULL, priority TEXT NOT NULL,
+      status INTEGER NOT NULL, error_code TEXT, queue_ms INTEGER NOT NULL DEFAULT 0, latency_ms INTEGER NOT NULL DEFAULT 0,
+      tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0, audio_seconds REAL NOT NULL DEFAULT 0,
+      chars INTEGER NOT NULL DEFAULT 0, stream INTEGER NOT NULL DEFAULT 0);
+      CREATE INDEX usage_tenant_ts ON usage (product, tenant, ts);
+      INSERT INTO usage (ts, request_id, product, tenant, task, model, priority, status) VALUES (1000, 'r', 'mesgai', 'biz-1', 'reply', 'qwen3-4b', 'realtime', 200);`);
+    old.close();
+    const store = new UsageStore(path);
+    expect(store.byTask('mesgai', 0, 2000, 'biz-1').reply?.calls).toBe(1);
+    store.close();
   });
 });

@@ -3,6 +3,10 @@
 Date: 18 Nov 2026. Audited code: branch `claude/upbeat-meitner-mqgp53`, commit `4d250cb`,
 merged with `main` (which adds `KONEQTI_GATEWAY_MASTER.md`).
 Status: **draft for owner approval** (master spec §20 Phase 0 exit criterion).
+Updated with `MESGAI_GATEWAY_HANDOVER.md` (§7 below) and the owner's scope answers:
+- **Image, Video and 3D packs + GPU lane (master §8.5–8.7, §9): later**, not in the current build.
+- **`KONEQTI_SCALING_PLAN.md`: not needed** for this work.
+- **D4 resolved by the handover:** MesgAI sends `X-Tenant-Id: mesgai` + `x-kq-subtenant: <business id>`.
 
 ---
 
@@ -17,12 +21,12 @@ because it is written as "never break" and overrides other instructions in this 
 | D1 | **Golden rule 1:** local models only, never call Claude/OpenAI/DeepSeek/Gemini/…, no API keys for them | T2 cheap cloud + T3 frontier models (§4.1), live call brain on a **fast cloud API** (§8.1), BYOK (§6), cloud image/video APIs (§8.5–8.6) | Allow external providers? If yes: rewrite rule 1 (e.g. "external providers only via the registry, behind a flag, per-tenant opt-in, never for tenants with `no_pii`/region limits"). If no: the gateway stays T0+T1 only and §4/§8.1 are cut down |
 | D2 | **Golden rule 5:** gateway has no business logic — no prompts, business facts or safety decisions | Profiles carry `system_prompt_ref`, tone, tools, `post_steps` (summary, crm_update, cdr); T0 answers from business data; risk flags hand off to humans (§4.0, §8.1) | Do profiles/prompts/T0 FAQ move into the gateway, or stay in products with the gateway only storing a routing profile? |
 | D3 | **Stage 0 host:** shared CloudPanel server, whole AI stack ≤ 3.5 CPU / 6 GB, everything in Docker, SQLite usage | Stack = PostgreSQL + Redis + BullMQ + PM2 + Next.js on a Contabo VPS (§0) | Same server or a new one? Postgres+Redis+dashboard in the same 6 GB would leave ~4 GB for Ollama — too little. Recommended: keep Docker (not PM2) and SQLite on the shared server for now; move to Postgres/Redis when the gateway gets its own server (Stage 1) |
-| D4 | `X-Tenant-Id` = the **business** (MesgAI sends its business id); product comes from the key | Tenant = **product/customer from the key**; `X-Tenant-Id` must equal the key's tenant or **403**; business = `x-kq-subtenant` (§11.1) | Taken literally this breaks every current caller. Proposed: if `x-kq-subtenant` is absent, treat legacy `X-Tenant-Id` as the subtenant (no 403) until MesgAI has switched; flag `STRICT_TENANT_HEADER` later |
+| D4 ✅ | `X-Tenant-Id` = the business | Tenant from the key; `X-Tenant-Id` must equal it or 403; business = `x-kq-subtenant` | **Resolved:** the handover adopts the master rule. Built (Part 1) |
 
 Smaller conflicts to confirm:
 - Safety budget: config has `classify.safety` 3000 ms; master §3.1 says 1.5 s. Qwen3-4B on ~3 CPU likely can't do 1.5 s with a long prompt — needs the benchmark (§22.6).
 - Priority names: code uses `realtime | interactive | batch`; master uses `realtime | normal | batch` (+ realtime must **never queue**, 503 at once; today realtime waits up to its timeout).
-- Referenced documents not in this repo: `KONEQTI_SCALING_PLAN.md`, `KONEQTI_SECURITY_STANDARD.md`, KoneqtiLoyalty spec (`requireApiKey`), `KONEQTI_3D_FACTORY.md`, `KONEQTI_3D_HIGH_END_TRACK.md`, the MesgAI handover (Parts 1–4).
+- Referenced documents not in this repo: `KONEQTI_SECURITY_STANDARD.md`, KoneqtiLoyalty spec (`requireApiKey`), `MESGAI_AMENDMENT_02_LIVE_TRANSLATED_CALLS.md` (Part 4). 3D Factory specs and the scaling plan are out of scope for now.
 - The gateway has **not been deployed yet**, so no product calls it in production. That makes breaking changes cheap *now* — a good moment to settle the header contract.
 
 ---
@@ -72,8 +76,8 @@ Smaller conflicts to confirm:
 | 3 | `x-kq-quality/latency-ms/max-cost/route/cache` hints | missing | only `X-Max-Latency-Ms` (≈ `x-kq-latency-ms`) |
 | 3 | `x-kq-route: pin:<model>` | missing | `model` field ignored today |
 | 3 | Response headers `x-kq-model/tier/cost-usd/baseline-usd/cache` | partial | `X-Model-Used` exists; others missing |
-| 3.1 | Priority pools | partial | pools exist; names differ (`interactive`→`normal`); realtime queues instead of 503-immediately; ASR/TTS for realtime not reserved separately from voice notes |
-| 3.1 | Time budgets 2 s / 25 s / 1.5 s / 60 s | partial | 25 s and 60 s match; safety 3 s; no 2 s realtime turn |
+| 3.1 | Priority pools | exists (Part 1) | `realtime/normal/batch`, realtime never queued (503 at once), reserved realtime slots per pool, batch yields to normal |
+| 3.1 | Time budgets 2 s / 25 s / 1.5 s / 60 s | exists (Part 1) | 1.5 s safety still to be proven on the CPU |
 | 4.0 L1 | Entry points per modality | partial | chat/transcriptions/speech exist; `WS /v1/packs/voice/session`, `/v1/audio/messages`, `/v1/jobs`, `/v1/packs/docs/extract` missing |
 | 4.0 L2 | Profiles (`x-kq-profile`, profiles table, defaults) | partial / blocked (D2) | `tasks.yaml` is a simple profile (model, priority, timeout, max_tokens, json). No table, no tenant override, no pipeline steps |
 | 4.0 L3 | Language ID, intent classifier, risk flags | missing | `classify.intent` task exists but the product calls it; gateway doesn't classify by itself |
@@ -99,16 +103,16 @@ Smaller conflicts to confirm:
 | 8.2 | Document Pack (OCR → extraction → field confidence) | partial | `extract.invoice` (text only); no OCR, no field confidence |
 | 8.3 | Embeddings Pack | missing | `/v1/embeddings` = 501. A small local model (e.g. BGE-M3) needs RAM inside the 6 GB cap |
 | 8.4 | Content Pack | partial | `seo.content`, `summary`, `translate.draft` batch tasks; no variants, checks or async lane |
-| 8.5–8.7 | Image / Video / 3D packs | missing | CPU image gen would compete with Ollama for the same 3.5 CPU |
+| 8.5–8.7 | Image / Video / 3D packs | later (owner) | out of current scope |
 | 8.8 | Benchmark first | partial | `bench/run.js` ready, not yet run on the VPS |
-| 9 | GPU job lane | missing | Phase 5 |
+| 9 | GPU job lane | later (owner) | out of current scope |
 | 10 | `usage_ledger` with cost + baseline + overhead | partial | SQLite `usage` has tokens/latency/status; no cost, baseline, modality, cache, escalations, subtenant |
 | 10.1 | Savings formula / report | missing | local-only: cost = measured VPS cost ÷ throughput; baseline = declared model at list price |
 | 11 | Tenants + hashed keys | partial | hashed keys in env; no tenants table, no prefix shown, no scopes |
 | 11 | Budgets (daily/monthly, block/downgrade/alert) | missing | needs cost per request first |
 | 11 | Rate limits per key (token bucket) | partial | per product + per tenant fixed-window, in memory |
 | 11 | `internal=true` tenants | missing | all callers are internal today |
-| 11.1 | Subtenants (`x-kq-subtenant`, auto-create, settings, data delete, `subtenant_limit` 429) | partial / D4 | today's `X-Tenant-Id` *is* the subtenant (per-business rate limit + usage). No settings, no delete endpoint, error code is `rate_limited` / `too_many_concurrent` |
+| 11.1 | Subtenants (`x-kq-subtenant`, auto-create, settings, data delete, `subtenant_limit` 429) | exists (Part 1) | strict `X-Tenant-Id` match → 403 |
 | 12 | Billing / Stripe | missing | Phase 6 |
 | 13 | Golden sets, eval gate, shadow mode, rollback | partial | `evals/` + baseline compare (CLI); no shadow mode, no versioned rules |
 | 14 | Prometheus metrics | partial | requests, latency, queue, tokens, host RAM, reply p95; no tier/cache/escalation/cost metrics |
@@ -117,17 +121,17 @@ Smaller conflicts to confirm:
 | 15 | PII detector, data region routing, encrypted provider keys | missing / blocked (D1) | |
 | 16 | New tables | missing | only `usage` exists |
 | 17 | `GET /v1/models` with `kq/auto` | partial | lists logical models; no `kq/auto` |
-| 17.1 | Transcription: formats incl. 8 kHz, `duration_sec` | partial | formats ok via PyAV (8 kHz untested); field is `duration` → add `duration_sec` alias |
-| 17.1 | Speech: `ogg_opus · mp3 · mulaw_8k · pcm_16k`, `stream:true` | partial | has `wav/mp3/ogg/opus`; missing `mulaw_8k`, `pcm_16k`, the `ogg_opus` name, streaming |
-| 17.1 | Safety ≤ 1000 chars, < 1.5 s | partial | accepts 4000 chars; 3 s budget |
+| 17.1 | Transcription: formats incl. 8 kHz, `duration_sec` | exists (Part 1) | WER-at-8 kHz report still to do |
+| 17.1 | Speech: `ogg_opus · mp3 · mulaw_8k · pcm_16k`, `stream:true` | partial | formats done; `stream` → 501 until Part 4 |
+| 17.1 | Safety ≤ 1000 chars, < 1.5 s | exists (Part 1) | latency to be measured |
 | 17.1 | `POST /v1/translate` | missing | `translate.draft` exists as a chat task only |
 | 17.1 | `WS /v1/realtime/transcribe` | missing | needs streaming ASR |
 | 17.1 | Voices API (consent sentence, multipart create, list, delete) | missing | different paths from today's `/v1/voices/:business_id` (501) |
-| 17.1 | `GET /v1/usage?subtenant=&from=&to=` | partial | has `since_hours` + `tenant` |
-| 17.1 | `PUT /v1/subtenants/:id/settings`, `DELETE /v1/subtenants/:id/data` | missing | |
-| 17.2 | `x-kq-*` request headers; `X-Task` as legacy alias of profiles | partial | `X-Task` is the only mechanism today; alias map needed |
-| 17.2 | `X-Request-Id` from caller echoed back | partial | gateway always generates its own; should accept the caller's |
-| 17.2 | `x-kq-usage-tokens`, `x-kq-usage-audio-sec` | partial | same data in `X-Usage`; add the new headers, keep `X-Usage` |
+| 17.1 | `GET /v1/usage?subtenant=&from=&to=` | exists (Part 1) | |
+| 17.1 | `PUT /v1/subtenants/:id/settings`, `DELETE /v1/subtenants/:id/data` | exists (Part 1) | |
+| 17.2 | `x-kq-*` request headers; `X-Task` as legacy alias of profiles | partial | `x-kq-subtenant`, `x-kq-priority` done; `x-kq-profile`, quality/route/cache hints not yet |
+| 17.2 | `X-Request-Id` from caller echoed back | exists (Part 1) | |
+| 17.2 | `x-kq-usage-tokens`, `x-kq-usage-audio-sec` | exists (Part 1) | `X-Usage` kept |
 | 18 | Next.js dashboard | missing | Phase 6 (and too heavy for the shared server) |
 | 19 | Products send `x-kq-product` | partial | product comes from the key already (more reliable than a header) |
 | 21 | CLAUDE.md rules | missing / D1–D4 | several new rules contradict current ones; owner rewrites CLAUDE.md |
@@ -180,3 +184,39 @@ No product calls the gateway in production yet (not deployed). MesgAI has been t
 6. VPS capacity — `bench/run.js` ready, run on deploy.
 7. Savings Share legal wording — owner.
 8. Competitor check — later.
+
+---
+
+## 7. MesgAI handover review (`MESGAI_GATEWAY_HANDOVER.md`)
+
+### 7.1 Built now — handover Part 1 (commit after this audit)
+| Handover item | State |
+|---|---|
+| §0 headers: tenant from key, `X-Tenant-Id` must match (403 `tenant_mismatch`), `x-kq-subtenant` required on work endpoints (`system` allowed), `x-kq-priority` (`realtime/normal/batch`; legacy `X-Priority`, `interactive` = `normal`), caller `X-Request-Id` echoed | ✅ |
+| §0 response headers `X-Model-Used` (+ `x-kq-model`), `x-kq-usage-tokens`, `x-kq-usage-audio-sec`, `Retry-After` | ✅ (streams put usage in the last SSE chunk) |
+| §0 errors: `429 subtenant_limit` (other businesses unaffected), 401/403/400/503 | ✅ (tenant-wide limit → `429 tenant_limit`) |
+| §1.1 chat body, `model: "auto"` ignored | ✅ |
+| §1.2 transcription formats ogg/opus, wav 8 kHz + 16 kHz, m4a, mp3, webm; `duration_sec` | ✅ decoding tested for every format; `duration` kept as alias. **8 kHz WER test per language: still to do on the server** (needs real phone-audio test set) |
+| §1.3 safety ≤ 1000 chars, 1.5 s budget | ✅ (413 over 1000; `classify.safety` timeout 1500 ms, jumps the normal queue). ⚠️ May often 503 on Stage 0 CPU → keyword filter; measure |
+| §1.4 realtime never queues, 503 at once; batch never takes reserved workers; budgets 2 s / 25 s / 1.5 s / 60 s | ✅ `reserved_realtime` per pool (0 on the Stage 0 server: no live calls there) |
+| §1.5 `GET /v1/usage?subtenant=&from=&to=` → `by_task` | ✅ (keys are gateway task names: `reply`, `transcribe`, `tts`, …) |
+| §1.6 `PUT /v1/subtenants/:id/settings`, `DELETE /v1/subtenants/:id/data`, metadata-only logs, audio not kept | ✅ (gateway stores no content/cache/voices yet, so delete = ledger rows + settings) |
+| §2.1 speech formats `ogg_opus · mp3 · mulaw_8k · pcm_16k`, BCP-47 language, stock voice ids | ✅ (`ogg`/`opus`/`wav` still accepted). Cloned `v_…` ids → 404 until §2.2 exists |
+
+### 7.2 Not built yet
+| Item | Why / what's needed |
+|---|---|
+| §2.2 voice cloning with consent + speaker check | Needs model choice with **commercial** licences (cloning + speaker verification) and CPU feasibility — owner decision. v3 spec planned Chatterbox on GPU (Stage 2) |
+| §3 `/v1/translate` | Next (local Qwen3-4B + per-subtenant cache). `ur-Latn` quality to be measured |
+| §4 live transcribe WS, streaming TTS, per-turn timings | Last. Needs streaming ASR; not on the shared Stage 0 server |
+| 8 kHz vs 16 kHz WER report | Needs a recorded test set (Urdu, Arabic, English, Spanish, Roman Urdu code-switching) |
+
+### 7.3 Answer to handover §7 (send back to MesgAI)
+All items in handover §7 are already in `KONEQTI_GATEWAY_MASTER.md` (§3.1, §8.1 C–E, §11.1, §17.1–17.2). Differences to settle:
+1. **Safety categories.** Handover: `none | self_harm | medical_emergency | threat | …`. Gateway (v3 spec, `config/safety.yaml`): `medical, self_harm, violence, gas, electrical, flooding, carbon_monoxide, fire, none`. Pick one list.
+2. **Licence field name.** Handover `license_commercial`; master `licence_ok`. Gateway will use `licence_ok` (master is the source of truth).
+3. **Usage keys.** `by_task` uses gateway task names: `transcribe` (not `transcription`), `tts`, `reply`, `classify.safety`, …
+4. **Key naming.** `X-Tenant-Id` must equal the tenant the key was issued for, so MesgAI's key is created as product `mesgai`.
+5. **Stock voices.** `voice` = the Piper voice listed in `GET /v1/models` → `tts_languages`. Roman Urdu (`ur-Latn`) has no voice → `422 tts_language_unavailable` → send text.
+6. **`stream: true`** → `501 stream_not_available_yet` until Part 4.
+7. **Realtime on the current server:** no reserved workers (no live calls in Stage 0), so `realtime` gets a worker only if one is free, else `503` at once.

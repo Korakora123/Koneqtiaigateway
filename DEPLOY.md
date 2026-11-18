@@ -80,10 +80,10 @@ scripts/check-limits.sh                # verifies the slice quota/memory
 ```bash
 KEY=<bench key>
 curl -s http://127.0.0.1:8787/v1/chat/completions \
-  -H "Authorization: Bearer $KEY" -H 'X-Tenant-Id: smoke' -H 'X-Task: reply' \
+  -H "Authorization: Bearer $KEY" -H 'x-kq-subtenant: smoke' -H 'X-Task: reply' \
   -H 'Content-Type: application/json' -D - \
   -d '{"messages":[{"role":"system","content":"Reply in Roman Urdu, one sentence."},{"role":"user","content":"Assalam o alaikum, kal plumber aa sakta hai?"}]}'
-# expect 200, X-Model-Used: qwen3-4b, X-Queue-Ms, X-Usage, X-Request-Id
+# expect 200, X-Model-Used/x-kq-model: qwen3-4b, x-kq-usage-tokens, X-Request-Id
 docker compose logs gateway | tail -3  # metadata only — no message text
 ```
 
@@ -145,6 +145,7 @@ Usage DB: volume `ai-gateway_gateway_data` (`usage.db`, metadata only, pruned af
 **Never** `docker compose down -v` without the owner's approval — it deletes the models and usage data.
 
 ## 13. MesgAI cutover (spec §10)
+Create MesgAI's key as product `mesgai` (it sends `X-Tenant-Id: mesgai`, which must match).
 In the brain's env: `AI_GATEWAY_URL=https://ai.example.com:8443`, `AI_GATEWAY_KEY=<mesgai key>`,
 `USE_AI_GATEWAY=true` (keep the old `OLLAMA_URL`/`WHISPER_URL`/… until verified). Use
 `sdk/` (`@koneqti/ai`): on `BusyError` send the reviewed holding reply; for safety, fall back to

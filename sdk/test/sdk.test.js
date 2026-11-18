@@ -16,14 +16,16 @@ function fakeFetch(responses) {
 test('chat sends Koneqti headers and parses JSON output', async () => {
   const f = fakeFetch([{ status: 200, body: { choices: [{ message: { content: '{"a":1}' } }] }, headers: { 'x-model-used': 'qwen3-4b' } }]);
   const ai = new KoneqtiAI({ url: 'http://gw', key: 'k', fetch: f });
-  const out = await ai.chat('extract.order', { messages: [], response_format: { type: 'json_object' } }, { tenant: 't1', priority: 'interactive' });
+  const out = await ai.chat('extract.order', { messages: [], response_format: { type: 'json_object' } }, { subtenant: 'biz-1', priority: 'normal', requestId: 'm-1' });
   assert.deepEqual(out.json, { a: 1 });
   assert.equal(out.meta.modelUsed, 'qwen3-4b');
   const h = f.calls[0].init.headers;
   assert.equal(h.authorization, 'Bearer k');
   assert.equal(h['x-task'], 'extract.order');
-  assert.equal(h['x-tenant-id'], 't1');
-  assert.equal(h['x-priority'], 'interactive');
+  assert.equal(h['x-kq-subtenant'], 'biz-1');
+  assert.equal(h['x-kq-priority'], 'normal');
+  assert.equal(h['x-request-id'], 'm-1');
+  assert.equal(h['x-tenant-id'], undefined);
 });
 
 test('503 → BusyError with retryAfter (no retries by default)', async () => {

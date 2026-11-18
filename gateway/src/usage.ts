@@ -6,8 +6,10 @@ import Database from 'better-sqlite3';
 export interface UsageRecord {
   ts: number;
   request_id: string;
+  /** Tenant = product that owns the key. */
   product: string;
-  tenant: string;
+  /** Business id (x-kq-subtenant) or `system`. */
+  subtenant: string;
   task: string;
   model: string;
   priority: string;
@@ -22,36 +24,60 @@ export interface UsageRecord {
   stream: number;
 }
 
-export interface UsageSummaryRow {
-  task: string;
-  model: string;
-  requests: number;
+export interface TaskUsage {
+  calls: number;
   errors: number;
   busy: number;
+  tokens: number;
   tokens_in: number;
   tokens_out: number;
-  audio_seconds: number;
+  audio_sec: number;
   chars: number;
   avg_latency_ms: number;
-  avg_queue_ms: number;
 }
+
+export interface SubtenantSettings {
+  retention_days: number;
+  allow_cache: boolean;
+}
+
+export const DEFAULT_SETTINGS: SubtenantSettings = { retention_days: 0, allow_cache: true };
 
 export class UsageStore {
   private readonly db: Database.Database;
   private readonly insertStmt: Database.Statement;
+  private readonly touchStmt: Database.Statement;
 
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
+    this.migrate();
+    this.insertStmt = this.db.prepare(`
+      INSERT INTO usage (ts, request_id, product, subtenant, task, model, priority, status, error_code,
+                         queue_ms, latency_ms, tokens_in, tokens_out, audio_seconds, chars, stream)
+      VALUES (@ts, @request_id, @product, @subtenant, @task, @model, @priority, @status, @error_code,
+              @queue_ms, @latency_ms, @tokens_in, @tokens_out, @audio_seconds, @chars, @stream)`);
+    this.touchStmt = this.db.prepare(
+      `INSERT OR IGNORE INTO subtenants (product, subtenant, retention_days, allow_cache, created_at, updated_at)
+       VALUES (?, ?, 0, 1, ?, ?)`,
+    );
+  }
+
+  private migrate(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(usage)`).all() as Array<{ name: string }>;
+    // v0 (Sep 2026) called the business column `tenant`.
+    if (cols.some((c) => c.name === 'tenant') && !cols.some((c) => c.name === 'subtenant')) {
+      this.db.exec(`ALTER TABLE usage RENAME COLUMN tenant TO subtenant; DROP INDEX IF EXISTS usage_tenant_ts;`);
+    }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS usage (
         id            INTEGER PRIMARY KEY AUTOINCREMENT,
         ts            INTEGER NOT NULL,
         request_id    TEXT    NOT NULL,
         product       TEXT    NOT NULL,
-        tenant        TEXT    NOT NULL,
+        subtenant     TEXT    NOT NULL,
         task          TEXT    NOT NULL,
         model         TEXT    NOT NULL,
         priority      TEXT    NOT NULL,
@@ -66,32 +92,75 @@ export class UsageStore {
         stream        INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS usage_product_ts ON usage (product, ts);
-      CREATE INDEX IF NOT EXISTS usage_tenant_ts ON usage (product, tenant, ts);
+      CREATE INDEX IF NOT EXISTS usage_subtenant_ts ON usage (product, subtenant, ts);
+      CREATE TABLE IF NOT EXISTS subtenants (
+        product        TEXT    NOT NULL,
+        subtenant      TEXT    NOT NULL,
+        retention_days INTEGER NOT NULL DEFAULT 0,
+        allow_cache    INTEGER NOT NULL DEFAULT 1,
+        created_at     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL,
+        PRIMARY KEY (product, subtenant)
+      );
     `);
-    this.insertStmt = this.db.prepare(`
-      INSERT INTO usage (ts, request_id, product, tenant, task, model, priority, status, error_code,
-                         queue_ms, latency_ms, tokens_in, tokens_out, audio_seconds, chars, stream)
-      VALUES (@ts, @request_id, @product, @tenant, @task, @model, @priority, @status, @error_code,
-              @queue_ms, @latency_ms, @tokens_in, @tokens_out, @audio_seconds, @chars, @stream)`);
   }
 
   record(r: UsageRecord): void {
     this.insertStmt.run(r);
   }
 
-  summary(product: string, sinceMs: number, tenant?: string): UsageSummaryRow[] {
-    const where = tenant ? 'product = ? AND ts >= ? AND tenant = ?' : 'product = ? AND ts >= ?';
-    const args = tenant ? [product, sinceMs, tenant] : [product, sinceMs];
-    return this.db
+  /** Subtenants are created automatically on first use (master spec §11.1). */
+  touchSubtenant(product: string, subtenant: string): void {
+    const t = Date.now();
+    this.touchStmt.run(product, subtenant, t, t);
+  }
+
+  /** Totals per task between [from, to) (epoch ms). `subtenant` omitted → whole tenant. */
+  byTask(product: string, from: number, to: number, subtenant?: string): Record<string, TaskUsage> {
+    const where = `product = ? AND ts >= ? AND ts < ?${subtenant ? ' AND subtenant = ?' : ''}`;
+    const args: Array<string | number> = subtenant ? [product, from, to, subtenant] : [product, from, to];
+    const rows = this.db
       .prepare(
-        `SELECT task, model, COUNT(*) AS requests,
-                SUM(status >= 400) AS errors, SUM(status = 503) AS busy,
+        `SELECT task, COUNT(*) AS calls, SUM(status >= 400) AS errors, SUM(status = 503) AS busy,
                 SUM(tokens_in) AS tokens_in, SUM(tokens_out) AS tokens_out,
-                ROUND(SUM(audio_seconds), 1) AS audio_seconds, SUM(chars) AS chars,
-                CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms, CAST(AVG(queue_ms) AS INTEGER) AS avg_queue_ms
-         FROM usage WHERE ${where} GROUP BY task, model ORDER BY task`,
+                ROUND(SUM(audio_seconds), 1) AS audio_sec, SUM(chars) AS chars,
+                CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms
+         FROM usage WHERE ${where} GROUP BY task ORDER BY task`,
       )
-      .all(...args) as UsageSummaryRow[];
+      .all(...args) as Array<Omit<TaskUsage, 'tokens'> & { task: string }>;
+    const out: Record<string, TaskUsage> = {};
+    for (const { task, ...r } of rows) out[task] = { ...r, tokens: r.tokens_in + r.tokens_out };
+    return out;
+  }
+
+  getSettings(product: string, subtenant: string): SubtenantSettings & { exists: boolean } {
+    const row = this.db
+      .prepare(`SELECT retention_days, allow_cache FROM subtenants WHERE product = ? AND subtenant = ?`)
+      .get(product, subtenant) as { retention_days: number; allow_cache: number } | undefined;
+    if (!row) return { ...DEFAULT_SETTINGS, exists: false };
+    return { retention_days: row.retention_days, allow_cache: row.allow_cache === 1, exists: true };
+  }
+
+  putSettings(product: string, subtenant: string, s: SubtenantSettings): void {
+    const t = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO subtenants (product, subtenant, retention_days, allow_cache, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (product, subtenant) DO UPDATE SET
+           retention_days = excluded.retention_days, allow_cache = excluded.allow_cache, updated_at = excluded.updated_at`,
+      )
+      .run(product, subtenant, s.retention_days, s.allow_cache ? 1 : 0, t, t);
+  }
+
+  /** Removes everything the gateway holds for one business (ledger rows + settings). */
+  deleteSubtenant(product: string, subtenant: string): { usage_rows: number } {
+    const del = this.db.transaction(() => {
+      const u = this.db.prepare(`DELETE FROM usage WHERE product = ? AND subtenant = ?`).run(product, subtenant).changes;
+      this.db.prepare(`DELETE FROM subtenants WHERE product = ? AND subtenant = ?`).run(product, subtenant);
+      return u;
+    });
+    return { usage_rows: del() };
   }
 
   /** Deletes rows older than `days` (run daily). */

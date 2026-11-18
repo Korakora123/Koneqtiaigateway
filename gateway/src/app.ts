@@ -13,7 +13,7 @@ import { Metrics } from './metrics.js';
 import { OllamaClient } from './backends/ollama.js';
 import { SpeechClient, TtsClient } from './backends/audio.js';
 import { GatewayError, busy } from './errors.js';
-import { newCtx, requireTenant, sendError, usageHeader } from './context.js';
+import { checkTenantHeader, newCtx, readSubtenant, requestIdFrom, sendError, usageHeader, usageTokens } from './context.js';
 import type { Deps } from './deps.js';
 import { registerChat } from './routes/chat.js';
 import { registerTranscriptions } from './routes/transcriptions.js';
@@ -22,6 +22,7 @@ import { registerVoices, registerEmbeddings } from './routes/voices.js';
 import { registerSafety } from './routes/safety.js';
 import { registerModels, registerUsage } from './routes/models.js';
 import { registerHealth } from './routes/health.js';
+import { registerSubtenants } from './routes/subtenants.js';
 
 export interface BuildOptions {
   env: Env;
@@ -40,13 +41,14 @@ export function buildDeps(env: Env, files: FileConfig, now: () => Date = () => n
     new PriorityPool({
       name,
       slots,
+      reservedRealtime: L.pools[name].reserved_realtime,
       maxQueue: L.pools[name].max_queue,
       initialServiceMs: L.defaults.initial_service_ms[name],
       peakMaxBatch: L.batch.peak_max_concurrent,
       isOffPeak: offPeak,
     });
-  // llm slots must match what Ollama really runs in parallel.
-  const llmSlots = env.OLLAMA_NUM_PARALLEL ?? L.pools.llm.slots;
+  // llm general + reserved slots must match what Ollama really runs in parallel.
+  const llmSlots = env.OLLAMA_NUM_PARALLEL !== undefined ? Math.max(1, env.OLLAMA_NUM_PARALLEL - L.pools.llm.reserved_realtime) : L.pools.llm.slots;
   const pools = { llm: pool('llm', llmSlots), speech: pool('speech', L.pools.speech.slots), tts: pool('tts', L.pools.tts.slots) };
   return {
     env,
@@ -63,8 +65,8 @@ export function buildDeps(env: Env, files: FileConfig, now: () => Date = () => n
   };
 }
 
-/** Routes under /v1 that do not need X-Tenant-Id. */
-const TENANT_OPTIONAL = new Set(['/v1/models', '/v1/usage']);
+/** /v1 routes that work without x-kq-subtenant (tenant-level, or the subtenant is in the path/query). */
+const SUBTENANT_OPTIONAL = [/^\/v1\/models$/, /^\/v1\/usage$/, /^\/v1\/subtenants\//];
 
 export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstance; deps: Deps }> {
   const files = opts.files ?? loadFileConfig(opts.env.CONFIG_DIR);
@@ -84,7 +86,8 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
     },
     // We log one metadata-only line per request ourselves (onResponse).
     logController: new LogController({ disableRequestLogging: true }),
-    genReqId: () => randomUUID(),
+    // The caller's X-Request-Id is echoed back for tracing (never stored with content).
+    genReqId: (raw) => requestIdFrom(raw.headers['x-request-id'], randomUUID),
     trustProxy: env.TRUST_PROXY,
     bodyLimit: files.limits.request.max_body_bytes,
   });
@@ -115,8 +118,8 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
       throw new GatewayError(401, 'invalid_product_key', 'missing or invalid product key');
     }
     ctx.product = product;
-    if (!TENANT_OPTIONAL.has(path)) ctx.tenant = requireTenant(req);
-    else if (typeof req.headers['x-tenant-id'] === 'string') ctx.tenant = requireTenant(req);
+    checkTenantHeader(req, product);
+    ctx.subtenant = readSubtenant(req, !SUBTENANT_OPTIONAL.some((re) => re.test(path)));
   });
 
   app.addHook('onSend', async (req, reply, payload) => {
@@ -124,8 +127,13 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
     if (!ctx) return payload;
     reply.header('x-request-id', ctx.requestId);
     if (!reply.hasHeader('x-model-used')) reply.header('x-model-used', ctx.model);
+    reply.header('x-kq-model', ctx.model);
     if (!reply.hasHeader('x-queue-ms')) reply.header('x-queue-ms', String(ctx.queueMs));
     if (!reply.hasHeader('x-usage')) reply.header('x-usage', usageHeader(ctx));
+    // Handover §0: numbers the product writes into its own per-business ledger.
+    // (Streams carry usage in their last SSE chunk instead — the header is sent before it is known.)
+    if (!ctx.stream && (ctx.tokensIn || ctx.tokensOut)) reply.header('x-kq-usage-tokens', String(usageTokens(ctx)));
+    if (ctx.audioSeconds) reply.header('x-kq-usage-audio-sec', ctx.audioSeconds.toFixed(2));
     return payload;
   });
 
@@ -153,7 +161,7 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
           ts: ctx.startedAt,
           request_id: ctx.requestId,
           product: ctx.product,
-          tenant: ctx.tenant ?? '',
+          subtenant: ctx.subtenant ?? 'system',
           task: ctx.task,
           model: ctx.model,
           priority: ctx.priority ?? '',
@@ -167,6 +175,7 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
           chars: ctx.chars,
           stream: ctx.stream ? 1 : 0,
         });
+        if (ctx.subtenant) deps.usage.touchSubtenant(ctx.product, ctx.subtenant);
       } catch (err) {
         req.log.error({ err: { message: (err as Error).message } }, 'usage write failed');
       }
@@ -177,7 +186,7 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
       {
         rid: ctx.requestId,
         product: ctx.product,
-        tenant: ctx.tenant,
+        subtenant: ctx.subtenant,
         task: ctx.task,
         model: ctx.model,
         priority: ctx.priority,
@@ -217,6 +226,7 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
   registerHealth(app, deps);
   registerModels(app, deps);
   registerUsage(app, deps);
+  registerSubtenants(app, deps);
   registerChat(app, deps);
   registerTranscriptions(app, deps);
   registerSpeech(app, deps);

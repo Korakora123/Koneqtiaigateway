@@ -1,6 +1,8 @@
 # STATUS — koneqti-ai-gateway
 
-**Stage 0 — built, not yet deployed.** Code, tests, compose file and deploy runbook are ready;
+**Stage 0 — built, not yet deployed.** Nov 2026: MesgAI handover Part 1 contract built
+(subtenants, `x-kq-*` headers, realtime pool, per-business usage/privacy, new audio formats) —
+see `GATEWAY_AUDIT.md` §7 for the handover review and the master-spec gap table. Code, tests, compose file and deploy runbook are ready;
 deployment to the CloudPanel VPS and the on-server acceptance checks are the next step (`DEPLOY.md`).
 
 ## What is built (spec §12 build order)
@@ -19,7 +21,9 @@ deployment to the CloudPanel VPS and the on-server acceptance checks are the nex
 - `gateway/` — Node 22 / TypeScript strict / Fastify 5 / zod / better-sqlite3 / prom-client.
   Product keys (sha256 in env), IP allowlist (CIDR), per-product + per-tenant rate limits
   (rpm + concurrent), priority pools `llm` (2 slots = `OLLAMA_NUM_PARALLEL`), `speech` (1), `tts` (1).
-  Batch: runs off-peak, or at peak only when no realtime job waits and ≤ 1 batch job at a time.
+  Priorities `realtime | normal | batch`: realtime is never queued (reserved slot, else a free one,
+  else 503 at once); `fast` tasks (classify) jump the normal queue; batch yields to normal and at
+  peak runs ≤ 1 at a time.
   Deadline = task `timeout_ms` (or shorter `X-Max-Latency-Ms`) → `503 busy` + `Retry-After`,
   also recorded in usage. Every response sets `X-Model-Used`, `X-Queue-Ms`, `X-Usage`, `X-Request-Id`.
   Logs: one metadata line per request (product, tenant, task, model, tokens, queue ms, latency, status).
@@ -34,18 +38,25 @@ deployment to the CloudPanel VPS and the on-server acceptance checks are the nex
 ## API summary
 | Endpoint | Notes |
 |---|---|
-| `POST /v1/chat/completions` | `X-Task` required; OpenAI body; `stream`; `response_format` json_object/json_schema (validated with ajv → 502 `schema_validation_failed` if the model breaks it); prompt > `MAX_CONTEXT_TOKENS` → 400 |
-| `POST /v1/audio/transcriptions` | multipart `file` (≤ 25 MB), optional `language`, `response_format` json/text/verbose_json |
-| `POST /v1/audio/speech` | `{input\|text, language, voice?, response_format\|format: wav\|mp3\|ogg\|opus, speed?}`; unknown language → 422 `tts_language_unavailable` |
-| `POST /v1/safety/classify` | `{text, language?}` → `{category, score, model}`; 3 s budget → 503 so the product uses its keyword filter |
-| `PUT/GET/DELETE /v1/voices/{business_id}` | 501 `not_available_until_gpu` |
+| `POST /v1/chat/completions` | `X-Task` required; OpenAI body (`model` ignored); `stream`; `response_format` json_object/json_schema (validated with ajv → 502 `schema_validation_failed`); prompt > `MAX_CONTEXT_TOKENS` → 400 |
+| `POST /v1/audio/transcriptions` | multipart `file` ≤ 25 MB (ogg/opus, wav 8/16 kHz, m4a, mp3, webm), optional `language` → `{text, language, language_probability, confidence, duration_sec}` |
+| `POST /v1/audio/speech` | `{input, language (BCP-47), voice?, format: ogg_opus·mp3·mulaw_8k·pcm_16k·wav, speed?}`; unknown language (incl. `ur-Latn`) → 422 `tts_language_unavailable`; `stream:true` → 501 (Part 4) |
+| `POST /v1/safety/classify` | `{text ≤ 1000, language?}` → `{category, score, model}`; 1.5 s budget → 503 so the product uses its keyword filter |
+| `GET /v1/usage?subtenant=&from=&to=` | `by_task` totals for one business, or the whole tenant |
+| `GET/PUT /v1/subtenants/:id/settings`, `DELETE /v1/subtenants/:id/data` | `{retention_days, allow_cache}`; delete removes the business's ledger rows + settings |
+| `PUT/GET/DELETE /v1/voices/:id` | 501 (cloning not built) |
 | `POST /v1/embeddings` | 501 |
-| `GET /v1/models`, `GET /v1/usage?since_hours=24&tenant=` | models + tasks; own product's aggregated usage |
+| `GET /v1/models` | models + tasks + stock TTS voices |
 | `GET /health`, `GET /metrics` | IP allowlist only (no key). `/health` 503 if Ollama down / model not pulled |
 
-Headers in: `Authorization: Bearer <key>`, `X-Tenant-Id` (required on work endpoints), `X-Task`,
-`X-Priority` (may only **lower** the task's priority), `X-Max-Latency-Ms` (may only shorten).
-`X-Usage` format: `tokens_in=…;tokens_out=…;eval_ms=…` / `audio_seconds=…` / `chars=…`.
+Request headers: `Authorization: Bearer <key>` (tenant = the key's product), `X-Tenant-Id`
+(optional; must equal the key's tenant, else 403), `x-kq-subtenant` (business id or `system`;
+required on work endpoints), `X-Task`, `x-kq-priority` (`realtime|normal|batch`; legacy `X-Priority`,
+`interactive` = `normal`), `X-Max-Latency-Ms` (may only shorten), `X-Request-Id` (echoed back).
+Response headers: `X-Model-Used` + `x-kq-model`, `x-kq-usage-tokens`, `x-kq-usage-audio-sec`,
+`X-Queue-Ms`, `X-Usage` (`tokens_in=…;tokens_out=…;eval_ms=…` / `audio_seconds=…` / `chars=…`),
+`X-Request-Id`, `Retry-After` with 503/429. Errors: `429 subtenant_limit` (one business over its
+limit) / `tenant_limit`, `403 tenant_mismatch`, `400 subtenant_required`.
 
 ## Environment variables
 `GATEWAY_PORT` (8787), `GATEWAY_BIND` (127.0.0.1), `PRODUCT_KEYS`, `ALLOWED_IPS`, `TRUST_PROXY`,
@@ -59,9 +70,9 @@ See `.env.example`.
 | Suite | Result |
 |---|---|
 | `npm --prefix gateway run typecheck` | ✅ clean (strict) |
-| `npm --prefix gateway test` (vitest) | ✅ 34 passed — queue priority/batch gating/deadlines, auth, rate limits, chat + streaming, JSON schema, 503 + Retry-After, no text in logs, audio routes, 422/501, health |
-| `pytest services/speech` | ✅ 8 passed (fake model) |
-| `pytest services/tts` | ✅ 10 passed (fake voice; incl. Urdu→Devanagari) |
+| `npm --prefix gateway test` (vitest) | ✅ 43 passed — queue priorities (realtime instant 503, fast jobs, batch gating), deadlines, auth, tenant/subtenant contract, subtenant limits, usage per business, settings/delete, chat + streaming, JSON schema, 503 + Retry-After, no text in logs, audio routes + formats, 422/501, health, DB migration |
+| `pytest services/speech` | ✅ 15 passed (fake model + real decoding of wav 8/16/44.1 kHz, ogg/opus, mp3, m4a, webm) |
+| `pytest services/tts` | ✅ 16 passed (fake voice; real ffmpeg for ogg_opus/mp3/mulaw_8k/pcm_16k; Urdu→Devanagari) |
 | `npm --prefix sdk test`, `npm --prefix evals test` | ✅ 5 + 4 passed |
 | `docker compose config` (base + slice override) | ✅ valid; limits sum checked |
 | End-to-end: built gateway + fake Ollama → `bench/run.js` + `evals/run.js` | ✅ scripts run, headers/usage/logs correct |
@@ -102,5 +113,7 @@ Estimate before measuring (spec §5): 8–15 tok/s → 3–6 replies/min → ~20
 - Rate limits and queues are in-memory (single gateway process, Stage 0). Restarting the gateway
   answers queued requests with 503.
 - Tool calling, images and `n > 1` are rejected in Stage 0.
-- `KONEQTI_SCALING_PLAN.md` is referenced by the spec but is not in the repo yet.
+- Not built from the handover yet: voice cloning (needs licence-checked models), `/v1/translate`,
+  live-call streaming (Part 4), the 8 kHz WER report. Master-spec router/ledger costs/cache: see `GATEWAY_AUDIT.md`.
+- Safety in 1.5 s on the Stage 0 CPU is unproven — expect 503s (keyword filter) until benchmarked.
 - Tests need Node 22 (vitest 5); the gateway itself runs on Node 20+ (the image uses Node 22).

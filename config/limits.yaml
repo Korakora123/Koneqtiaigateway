@@ -1,34 +1,43 @@
 # Queue, timeout and rate-limit settings. Hardware-dependent: revisit per stage.
 
 pools:
-  # Concurrent jobs sent to each backend. llm must equal OLLAMA_NUM_PARALLEL.
-  llm:    { slots: 2, max_queue: { realtime: 16, interactive: 16, batch: 32 } }   # total ≤ OLLAMA_MAX_QUEUE (64)
-  speech: { slots: 1, max_queue: { realtime: 8,  interactive: 8,  batch: 16 } }
-  tts:    { slots: 1, max_queue: { realtime: 8,  interactive: 8,  batch: 16 } }
+  # slots            = general workers shared by `normal` and `batch` (batch yields to normal).
+  # reserved_realtime = extra workers ONLY `realtime` may use (live calls). Realtime also takes a free
+  #                    general slot; if none is free → 503 at once, never queued (handover §1.4).
+  # llm slots + reserved must equal OLLAMA_NUM_PARALLEL. The live-call brain is not a local LLM
+  # (master spec §8.1), so llm reserves nothing.
+  # Stage 0 (3.5 CPU cap): speech/tts reserve nothing either — no live calls on this server.
+  # Raise reserved_realtime (and the service's worker count) on a server that takes calls.
+  llm:    { slots: 2, reserved_realtime: 0, max_queue: { normal: 32, batch: 32 } }   # total ≤ OLLAMA_MAX_QUEUE (64)
+  speech: { slots: 1, reserved_realtime: 0, max_queue: { normal: 8,  batch: 16 } }
+  tts:    { slots: 1, reserved_realtime: 0, max_queue: { normal: 8,  batch: 16 } }
 
 defaults:
-  timeout_ms:                 # used when a task has no timeout_ms
-    realtime: 25000
-    interactive: 30000
-    batch: 1800000            # 30 min: batch may wait for the off-peak window / an empty realtime queue
+  timeout_ms:                 # used when a task has no timeout_ms; realtime also caps every task
+    realtime: 2000            # live-call turn
+    normal: 25000
+    batch: 1800000            # 30 min: batch may wait for the off-peak window / an empty normal queue
   # First guess of a job's run time per pool before real measurements exist (EWMA takes over).
   initial_service_ms: { llm: 8000, speech: 6000, tts: 1500 }
 
 batch:
-  # Outside the off-peak window, batch runs only when no realtime job is queued or running,
-  # and uses at most this many slots so a realtime request always finds one free.
+  # Outside the off-peak window, batch runs only when no `normal` job is waiting,
+  # and uses at most this many general slots at once.
   peak_max_concurrent: 1
 
 rate_limits:
-  # Per product (all its tenants together) and per tenant inside a product.
-  default_product: { requests_per_min: 600, concurrent: 24 }
-  default_tenant:  { requests_per_min: 60,  concurrent: 4 }
-  products:
-    # mesgai: { requests_per_min: 900, concurrent: 32 }
+  # Per tenant (= product, from its key; all its businesses together) and per subtenant
+  # (= one business, x-kq-subtenant). A subtenant over its limit gets 429 subtenant_limit;
+  # other businesses are unaffected.
+  default_tenant:    { requests_per_min: 600, concurrent: 24 }
+  default_subtenant: { requests_per_min: 60,  concurrent: 4 }
   tenants:
-    # "mesgai:big-customer-id": { requests_per_min: 120, concurrent: 6 }
+    # mesgai: { requests_per_min: 900, concurrent: 32 }
+  subtenants:
+    # "mesgai:3f2c0000-0000-0000-0000-000000000000": { requests_per_min: 120, concurrent: 6 }
 
 request:
   max_body_bytes: 1048576      # JSON bodies
   max_audio_bytes: 26214400    # 25 MB voice notes
   max_tts_chars: 1500
+  max_safety_chars: 1000

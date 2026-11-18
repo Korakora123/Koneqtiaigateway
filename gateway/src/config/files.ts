@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
 
-export const PRIORITIES = ['realtime', 'interactive', 'batch'] as const;
+export const PRIORITIES = ['realtime', 'normal', 'batch'] as const;
 export type Priority = (typeof PRIORITIES)[number];
 export const PriorityEnum = z.enum(PRIORITIES);
 
@@ -21,7 +21,9 @@ const ModelSchema = z.object({
 const TaskSchema = z.object({
   model: z.string(),
   service: z.enum(['llm', 'speech', 'tts']).default('llm'),
-  priority: PriorityEnum.default('interactive'),
+  priority: PriorityEnum.default('normal'),
+  /** Jumps ahead of other `normal` jobs (short classify calls). */
+  fast: z.boolean().default(false),
   timeout_ms: z.number().int().positive().optional(),
   max_tokens: z.number().int().positive().optional(),
   json_schema: z.boolean().default(false),
@@ -39,30 +41,32 @@ const TasksFileSchema = z
     }
   });
 
-const perPriority = <T extends z.ZodTypeAny>(s: T) => z.object({ realtime: s, interactive: s, batch: s });
+const perPriority = <T extends z.ZodTypeAny>(s: T) => z.object({ realtime: s, normal: s, batch: s });
 const RateSchema = z.object({ requests_per_min: z.number().int().positive(), concurrent: z.number().int().positive() });
+const PoolSchema = z.object({
+  slots: z.number().int().positive(),
+  reserved_realtime: z.number().int().nonnegative().default(0),
+  max_queue: z.object({ normal: z.number().int().nonnegative(), batch: z.number().int().nonnegative() }),
+});
 
 const LimitsFileSchema = z.object({
-  pools: z.object({
-    llm: z.object({ slots: z.number().int().positive(), max_queue: perPriority(z.number().int().nonnegative()) }),
-    speech: z.object({ slots: z.number().int().positive(), max_queue: perPriority(z.number().int().nonnegative()) }),
-    tts: z.object({ slots: z.number().int().positive(), max_queue: perPriority(z.number().int().nonnegative()) }),
-  }),
+  pools: z.object({ llm: PoolSchema, speech: PoolSchema, tts: PoolSchema }),
   defaults: z.object({
     timeout_ms: perPriority(z.number().int().positive()),
     initial_service_ms: z.object({ llm: z.number().positive(), speech: z.number().positive(), tts: z.number().positive() }),
   }),
   batch: z.object({ peak_max_concurrent: z.number().int().min(0) }),
   rate_limits: z.object({
-    default_product: RateSchema,
     default_tenant: RateSchema,
-    products: z.record(z.string(), RateSchema).nullish().transform((v) => v ?? {}),
+    default_subtenant: RateSchema,
     tenants: z.record(z.string(), RateSchema).nullish().transform((v) => v ?? {}),
+    subtenants: z.record(z.string(), RateSchema).nullish().transform((v) => v ?? {}),
   }),
   request: z.object({
     max_body_bytes: z.number().int().positive(),
     max_audio_bytes: z.number().int().positive(),
     max_tts_chars: z.number().int().positive(),
+    max_safety_chars: z.number().int().positive().default(1000),
   }),
 });
 
@@ -124,6 +128,8 @@ export function loadFileConfig(dir: string): FileConfig {
   };
 }
 
-export function timeoutFor(task: TaskConfig, limits: LimitsFile): number {
-  return task.timeout_ms ?? limits.defaults.timeout_ms[task.priority];
+/** Task budget at the given priority. Realtime is always capped at the live-call turn budget. */
+export function timeoutFor(task: TaskConfig, priority: Priority, limits: LimitsFile): number {
+  const t = task.timeout_ms ?? limits.defaults.timeout_ms[priority];
+  return priority === 'realtime' ? Math.min(t, limits.defaults.timeout_ms.realtime) : t;
 }

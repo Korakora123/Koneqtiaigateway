@@ -30,10 +30,13 @@ const sleep = (ms, signal) =>
   });
 
 function meta(res) {
+  const num = (h) => (res.headers.get(h) === null ? undefined : Number(res.headers.get(h)));
   return {
     requestId: res.headers.get('x-request-id'),
-    modelUsed: res.headers.get('x-model-used'),
+    modelUsed: res.headers.get('x-kq-model') ?? res.headers.get('x-model-used'),
     queueMs: Number(res.headers.get('x-queue-ms') ?? 0),
+    usageTokens: num('x-kq-usage-tokens'),
+    usageAudioSec: num('x-kq-usage-audio-sec'),
     usage: res.headers.get('x-usage'),
   };
 }
@@ -52,13 +55,19 @@ export class KoneqtiAI {
     this.fetch = o.fetch ?? globalThis.fetch;
   }
 
-  headers({ tenant, task, priority, maxLatencyMs } = {}, json = true) {
-    if (!tenant) throw new Error('tenant is required (X-Tenant-Id)');
+  /**
+   * `subtenant` = the business id (or 'system'). The tenant comes from the key; `tenant` is
+   * accepted as a v0 alias for `subtenant`.
+   */
+  headers({ subtenant, tenant, task, priority, maxLatencyMs, requestId } = {}, json = true) {
+    const sub = subtenant ?? tenant;
+    if (!sub) throw new Error("subtenant is required (business id, or 'system')");
     return {
       authorization: `Bearer ${this.key}`,
-      'x-tenant-id': String(tenant),
+      'x-kq-subtenant': String(sub),
       ...(task ? { 'x-task': task } : {}),
-      ...(priority ? { 'x-priority': priority } : {}),
+      ...(priority ? { 'x-kq-priority': priority } : {}),
+      ...(requestId ? { 'x-request-id': String(requestId) } : {}),
       ...(maxLatencyMs ? { 'x-max-latency-ms': String(maxLatencyMs) } : {}),
       ...(json ? { 'content-type': 'application/json' } : {}),
     };
@@ -142,7 +151,7 @@ export class KoneqtiAI {
     return { ...(await res.json()), meta: meta(res) };
   }
 
-  /** Voice note → {text, language, confidence, duration}. `audio` is a Buffer/Uint8Array/Blob. */
+  /** Voice note → {text, language, confidence, duration_sec}. `audio` is a Buffer/Uint8Array/Blob. */
   async transcribe(audio, opts) {
     const form = new FormData();
     form.append('file', audio instanceof Blob ? audio : new Blob([audio]), opts.filename ?? 'audio.ogg');
@@ -158,7 +167,7 @@ export class KoneqtiAI {
       {
         method: 'POST',
         headers: this.headers(opts),
-        body: JSON.stringify({ input: text, language: opts.language, response_format: opts.format ?? 'ogg' }),
+        body: JSON.stringify({ input: text, language: opts.language, format: opts.format ?? 'ogg_opus', ...(opts.voice ? { voice: opts.voice } : {}), ...(opts.speed ? { speed: opts.speed } : {}) }),
       },
       opts,
     );

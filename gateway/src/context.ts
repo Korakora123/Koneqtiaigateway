@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { PRIORITIES, PriorityEnum, timeoutFor, type Priority, type TaskConfig } from './config/files.js';
+import { PriorityEnum, timeoutFor, type Priority, type TaskConfig } from './config/files.js';
 import { busy, GatewayError } from './errors.js';
 import type { Deps } from './deps.js';
 import type { PriorityPool } from './queue/pool.js';
@@ -8,8 +8,10 @@ import type { PriorityPool } from './queue/pool.js';
 export interface RequestCtx {
   requestId: string;
   startedAt: number;
+  /** Tenant = the product/customer that owns the API key (never taken from a header). */
   product: string | null;
-  tenant: string | null;
+  /** Subtenant = one business inside the tenant (x-kq-subtenant), or `system`. */
+  subtenant: string | null;
   task: string | null;
   priority: Priority | null;
   model: string;
@@ -32,14 +34,14 @@ declare module 'fastify' {
   }
 }
 
-const TENANT_RE = /^[A-Za-z0-9._:@-]{1,128}$/;
+const ID_RE = /^[A-Za-z0-9._:@-]{1,128}$/;
 
 export function newCtx(requestId: string): RequestCtx {
   return {
     requestId,
     startedAt: Date.now(),
     product: null,
-    tenant: null,
+    subtenant: null,
     task: null,
     priority: null,
     model: 'none',
@@ -65,6 +67,9 @@ export function usageHeader(ctx: RequestCtx): string {
   return parts.length ? parts.join(';') : 'none';
 }
 
+/** `x-kq-usage-tokens`: input + output tokens (text endpoints). */
+export const usageTokens = (ctx: RequestCtx): number => ctx.tokensIn + ctx.tokensOut;
+
 export interface ResolvedTask {
   name: string;
   cfg: TaskConfig;
@@ -72,9 +77,19 @@ export interface ResolvedTask {
   deadline: number;
 }
 
+/** `x-kq-priority` (or legacy `X-Priority`; `interactive` = `normal`). Undefined when absent. */
+export function priorityHeader(req: FastifyRequest): Priority | undefined {
+  const raw = req.headers['x-kq-priority'] ?? req.headers['x-priority'];
+  if (typeof raw !== 'string' || !raw) return undefined;
+  const v = raw.trim().toLowerCase();
+  const parsed = PriorityEnum.safeParse(v === 'interactive' ? 'normal' : v);
+  if (!parsed.success) throw new GatewayError(400, 'invalid_priority', 'x-kq-priority must be realtime|normal|batch');
+  return parsed.data;
+}
+
 /**
- * Resolves X-Task (or a route's fixed task) against tasks.yaml, applies X-Priority (may only
- * lower priority) and X-Max-Latency-Ms (may only shorten the timeout), and takes a rate-limit slot.
+ * Resolves X-Task (or a route's fixed task) against tasks.yaml, applies x-kq-priority and
+ * X-Max-Latency-Ms (may only shorten the timeout), and takes a rate-limit slot.
  */
 export function resolveTask(
   req: FastifyRequest,
@@ -90,15 +105,8 @@ export function resolveTask(
     throw new GatewayError(400, 'wrong_endpoint', `task ${name} is served by the ${cfg.service} endpoint`);
   }
 
-  let priority = cfg.priority;
-  const ph = req.headers['x-priority'];
-  if (typeof ph === 'string' && ph) {
-    const parsed = PriorityEnum.safeParse(ph.toLowerCase());
-    if (!parsed.success) throw new GatewayError(400, 'invalid_priority', 'X-Priority must be realtime|interactive|batch');
-    if (PRIORITIES.indexOf(parsed.data) > PRIORITIES.indexOf(priority)) priority = parsed.data;
-  }
-
-  let timeout = timeoutFor({ ...cfg, priority }, deps.files.limits);
+  const priority = priorityHeader(req) ?? cfg.priority;
+  let timeout = timeoutFor(cfg, priority, deps.files.limits);
   const ml = req.headers['x-max-latency-ms'];
   if (typeof ml === 'string' && ml) {
     const n = Number(ml);
@@ -110,16 +118,37 @@ export function resolveTask(
   ctx.task = name;
   ctx.priority = priority;
   ctx.model = cfg.model;
-  ctx.releaseRate = deps.rateLimiter.enter(ctx.product!, ctx.tenant!);
+  ctx.releaseRate = deps.rateLimiter.enter(ctx.product!, ctx.subtenant!);
   return { name, cfg, priority, deadline: ctx.startedAt + timeout };
 }
 
-export function requireTenant(req: FastifyRequest): string {
+/**
+ * Tenant comes from the key only. `X-Tenant-Id` is accepted for backward compatibility but
+ * must equal the key's tenant (master spec §11.1).
+ */
+export function checkTenantHeader(req: FastifyRequest, product: string): void {
   const t = req.headers['x-tenant-id'];
-  if (typeof t !== 'string' || !TENANT_RE.test(t)) {
-    throw new GatewayError(400, 'tenant_required', 'X-Tenant-Id header is required ([A-Za-z0-9._:@-], max 128)');
+  if (t !== undefined && t !== product) {
+    throw new GatewayError(403, 'tenant_mismatch', 'X-Tenant-Id does not match the API key\'s tenant');
   }
-  return t;
+}
+
+/** `x-kq-subtenant`: the business id, or `system` for calls that belong to no business. */
+export function readSubtenant(req: FastifyRequest, required: boolean): string | null {
+  const s = req.headers['x-kq-subtenant'];
+  if (s === undefined || s === '') {
+    if (required) throw new GatewayError(400, 'subtenant_required', 'x-kq-subtenant header is required (business id or "system")');
+    return null;
+  }
+  if (typeof s !== 'string' || !ID_RE.test(s)) {
+    throw new GatewayError(400, 'invalid_subtenant', 'x-kq-subtenant must match [A-Za-z0-9._:@-], max 128');
+  }
+  return s;
+}
+
+/** Caller's `X-Request-Id` is echoed back (tracing); otherwise a new UUID. */
+export function requestIdFrom(header: string | string[] | undefined, fallback: () => string): string {
+  return typeof header === 'string' && ID_RE.test(header) ? header : fallback();
 }
 
 export interface Slot {
@@ -133,7 +162,12 @@ export interface Slot {
 /** Waits for a slot in `pool` (priority queue). Callers must `release()` it when done. */
 export async function acquireSlot(req: FastifyRequest, deps: Deps, pool: PriorityPool, task: ResolvedTask): Promise<Slot> {
   const ctx = req.ctx;
-  const lease = await pool.acquire({ priority: task.priority, deadline: task.deadline, signal: ctx.clientAbort.signal });
+  const lease = await pool.acquire({
+    priority: task.priority,
+    deadline: task.deadline,
+    fast: task.cfg.fast,
+    signal: ctx.clientAbort.signal,
+  });
   ctx.queueMs = lease.queueMs;
   deps.metrics.queueWait.observe({ pool: pool.name, priority: task.priority }, lease.queueMs / 1000);
   const remaining = task.deadline - Date.now();

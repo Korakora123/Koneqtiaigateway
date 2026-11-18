@@ -92,3 +92,30 @@ def test_no_text_in_logs(env, caplog):
         c.post("/synthesize", json={"text": "SECRET-TEXT", "language": "en"})
     assert "SECRET-TEXT" not in caplog.text
     assert "synthesized" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "fmt,ctype",
+    [("ogg_opus", "audio/ogg"), ("ogg", "audio/ogg"), ("mulaw_8k", "audio/basic"), ("pcm_16k", "audio/L16; rate=16000; channels=1")],
+)
+def test_format_names_and_aliases(env, fmt, ctype):
+    c, _, _ = env
+    r = c.post("/synthesize", json={"text": "x", "language": "en", "format": fmt})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == ctype
+
+
+def test_unknown_format_400(env):
+    c, _, _ = env
+    assert c.post("/synthesize", json={"text": "x", "language": "en", "format": "flac"}).status_code == 400
+
+
+@pytest.mark.skipif(__import__("shutil").which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_real_ffmpeg_encoding():
+    from app.main import encode
+
+    wav = fake_wav(1.0, rate=22050)  # Piper medium voices are 22.05 kHz
+    assert encode(wav, "ogg_opus")[:4] == b"OggS"
+    assert encode(wav, "mp3")[:3] in (b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2") or encode(wav, "mp3")[0] == 0xFF
+    assert len(encode(wav, "mulaw_8k")) == 8000  # 1 s × 8000 samples × 1 byte
+    assert len(encode(wav, "pcm_16k")) == 32000  # 1 s × 16000 samples × 2 bytes
