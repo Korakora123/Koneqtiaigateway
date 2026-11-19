@@ -74,8 +74,8 @@ See `.env.example`.
 |---|---|
 | `npm --prefix gateway run typecheck` | ✅ clean (strict) |
 | `npm --prefix gateway test` (vitest) | ✅ 46 passed — answer cache (hit/miss/off, per business, deleted with the business), queue priorities (realtime instant 503, fast jobs, batch gating), deadlines, auth, tenant/subtenant contract, subtenant limits, usage per business, settings/delete, chat + streaming, JSON schema, 503 + Retry-After, no text in logs, audio routes + formats, 422/501, health, DB migration |
-| `pytest services/speech` | ✅ 15 passed (fake model + real decoding of wav 8/16/44.1 kHz, ogg/opus, mp3, m4a, webm) |
-| `pytest services/tts` | ✅ 16 passed (fake voice; real ffmpeg for ogg_opus/mp3/mulaw_8k/pcm_16k; Urdu→Devanagari) |
+| `pytest services/speech` | ✅ 18 passed (incl. lazy load / idle unload) (fake model + real decoding of wav 8/16/44.1 kHz, ogg/opus, mp3, m4a, webm) |
+| `pytest services/tts` | ✅ 17 passed (incl. idle voice unload) (fake voice; real ffmpeg for ogg_opus/mp3/mulaw_8k/pcm_16k; Urdu→Devanagari) |
 | `npm --prefix sdk test`, `npm --prefix evals test` | ✅ 5 + 4 passed |
 | `docker compose config` (base + slice override) | ✅ valid; limits sum checked |
 | End-to-end: built gateway + fake Ollama → `bench/run.js` + `evals/run.js` | ✅ scripts run, headers/usage/logs correct |
@@ -91,6 +91,19 @@ Not run yet — needs the real server. `node bench/run.js` fills this in.
 |---|---|---|---|---|---|---|
 
 Estimate before measuring (spec §5): 8–15 tok/s → 3–6 replies/min → ~20–30 active businesses.
+
+## Memory (estimates — confirm with `docker stats` on VPS2)
+Limits are ceilings, not reservations. Every model loads on first use and unloads when idle
+(`OLLAMA_KEEP_ALIVE=10m`, `WHISPER_IDLE_UNLOAD_S=900`, `TTS_IDLE_UNLOAD_S=900`).
+| Part | idle | busy | limit |
+|---|---|---|---|
+| Ollama + Qwen3-4B (2 slots × 4096 ctx) | ~0.1 GB | ~4 GB | 4.3 GB |
+| Speech (Whisper small int8) | ~0.15 GB | ~0.8 GB | 1 GB |
+| TTS (Piper, ≤ 2 voices) | ~0.1 GB | ~0.35 GB | 384 MB |
+| Gateway | ~0.1 GB | ~0.15 GB | 256 MB |
+| **Total** | **~0.3–0.5 GB** | **~5.5–6 GB** | **~6 GB** |
+First request after an unload waits for the load (Qwen3-4B ~3–10 s, Whisper ~2–5 s).
+Adding Qwen3-1.7B for safety would add ~1.5–2 GB busy.
 
 ## Answer cache (master spec §5, exact match only)
 Tasks with `cache_ttl_s` in `config/tasks.yaml` and temperature ≤ 0.3: `classify.safety`,

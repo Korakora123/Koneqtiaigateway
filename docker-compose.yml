@@ -5,6 +5,9 @@
 # so the whole AI stack can never use more than that. Do not remove or raise them
 # without the owner's written approval.
 #
+#   (these are CEILINGS, not reservations: unused RAM stays free for the other VPS2 backends.
+#    Models load on first use and unload when idle — OLLAMA_KEEP_ALIVE, WHISPER_IDLE_UNLOAD_S,
+#    TTS_IDLE_UNLOAD_S — so a quiet AI stack uses ~0.3 GB.)
 #   ollama   2.60 cpu  4400m ram  5000m ram+swap
 #   speech   0.60 cpu  1024m      1200m
 #   tts      0.20 cpu   384m       450m
@@ -102,6 +105,9 @@ services:
       WHISPER_THREADS: "2"
       WHISPER_MODEL_DIR: /models
       HF_HUB_OFFLINE: "1"
+      # Lazy loading: Whisper loads on the first voice note, unloads after this many idle seconds
+      WHISPER_IDLE_UNLOAD_S: ${WHISPER_IDLE_UNLOAD_S:-900}
+      WHISPER_PRELOAD: ${WHISPER_PRELOAD:-false}
       LOG_LEVEL: ${SERVICE_LOG_LEVEL:-INFO}
     volumes:
       - whisper_models:/models
@@ -126,6 +132,7 @@ services:
       TTS_LANGUAGES_FILE: /config/tts_languages.yaml
       TTS_THREADS: "1"
       TTS_MAX_LOADED_VOICES: "2"
+      TTS_IDLE_UNLOAD_S: ${TTS_IDLE_UNLOAD_S:-900}
       LOG_LEVEL: ${SERVICE_LOG_LEVEL:-INFO}
     volumes:
       - ./config:/config:ro

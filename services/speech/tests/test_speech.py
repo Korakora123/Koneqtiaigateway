@@ -1,3 +1,4 @@
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -26,7 +27,7 @@ class FakeModel:
 
 def client(model=None, **settings):
     fake = model or FakeModel()
-    app = create_app(Settings(**settings), model_factory=lambda s: fake)
+    app = create_app(Settings(**settings), model_factory=lambda s: fake, model_check=lambda s: True)
     return TestClient(app), fake
 
 
@@ -35,14 +36,53 @@ def test_health_ok():
         assert c.get("/health").json()["ok"] is True
 
 
-def test_health_503_when_model_fails_to_load():
+def test_load_failure_is_503_and_visible_in_health():
     def boom(_s):
         raise RuntimeError("no model")
 
-    with TestClient(create_app(Settings(), model_factory=boom)) as c:
-        r = c.get("/health")
+    with TestClient(create_app(Settings(), model_factory=boom, model_check=lambda s: True)) as c:
+        assert c.get("/health").status_code == 200  # nothing tried yet (lazy)
+        r = c.post("/transcribe", files={"file": ("a.ogg", b"x")})
         assert r.status_code == 503
-        assert c.post("/transcribe", files={"file": ("a.ogg", b"x")}).status_code == 503
+        assert r.json()["detail"]["code"] == "model_load_failed"
+        assert c.get("/health").json()["detail"]["code"] == "model_load_failed"
+
+
+def test_health_503_when_model_not_downloaded():
+    with TestClient(create_app(Settings(), model_factory=lambda s: FakeModel(), model_check=lambda s: False)) as c:
+        assert c.get("/health").json()["detail"]["code"] == "model_not_downloaded"
+
+
+def test_lazy_load_then_idle_unload_then_reload():
+    loads = []
+
+    def factory(_s):
+        loads.append(1)
+        return FakeModel()
+
+    app = create_app(Settings(idle_unload_s=0.05), model_factory=factory, model_check=lambda s: True)
+    with TestClient(app) as c:
+        assert loads == []  # not loaded at start-up
+        assert c.get("/health").json()["loaded"] is False
+        assert c.post("/transcribe", files={"file": ("n.ogg", b"x")}).status_code == 200
+        assert len(loads) == 1 and c.get("/health").json()["loaded"] is True
+        app.state.reap()  # used just now → stays
+        assert app.state.lazy.loaded
+        time.sleep(0.08)
+        app.state.reap()
+        assert c.get("/health").json()["loaded"] is False
+        assert c.post("/transcribe", files={"file": ("n.ogg", b"x")}).status_code == 200
+        assert len(loads) == 2
+
+
+def test_preload_and_never_unload():
+    loads = []
+    app = create_app(Settings(idle_unload_s=0, preload=True), model_factory=lambda s: loads.append(1) or FakeModel(),
+                     model_check=lambda s: True)
+    with TestClient(app) as c:
+        assert len(loads) == 1
+        app.state.reap()
+        assert c.get("/health").json()["loaded"] is True
 
 
 def test_transcribe_returns_text_language_confidence():

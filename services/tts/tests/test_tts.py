@@ -119,3 +119,26 @@ def test_real_ffmpeg_encoding():
     assert encode(wav, "mp3")[:3] in (b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2") or encode(wav, "mp3")[0] == 0xFF
     assert len(encode(wav, "mulaw_8k")) == 8000  # 1 s × 8000 samples × 1 byte
     assert len(encode(wav, "pcm_16k")) == 32000  # 1 s × 16000 samples × 2 bytes
+
+
+def test_voices_load_lazily_and_unload_when_idle(tmp_path: Path):
+    (tmp_path / "en_US-test.onnx").write_bytes(b"x")
+    loaded = []
+    app = create_app(
+        Settings(voices_dir=str(tmp_path), languages={"en": {"voice": "en_US-test"}}, idle_unload_s=0.05),
+        voice_loader=lambda path, threads: loaded.append(path.name) or path.stem,
+        synth=lambda v, t, sp: fake_wav(0.1),
+        encoder=lambda wav, fmt: wav,
+    )
+    with TestClient(app) as c:
+        assert c.get("/health").json()["loaded"] == []
+        c.post("/synthesize", json={"text": "a", "language": "en"})
+        assert c.get("/health").json()["loaded"] == ["en_US-test"]
+        assert app.state.reap() == []  # just used
+        import time
+
+        time.sleep(0.08)
+        assert app.state.reap() == ["en_US-test"]
+        assert c.get("/health").json()["loaded"] == []
+        c.post("/synthesize", json={"text": "a", "language": "en"})
+        assert loaded == ["en_US-test.onnx", "en_US-test.onnx"]

@@ -14,6 +14,7 @@ import threading
 import time
 import wave
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -23,6 +24,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from app.lazy import Reaper, release_memory
 from app.translit import TRANSLITERATORS
 
 log = logging.getLogger("tts")
@@ -50,6 +52,9 @@ class Settings:
     voices_dir: str = os.getenv("VOICES_DIR", "/voices")
     threads: int = int(os.getenv("TTS_THREADS", "1"))
     max_loaded_voices: int = int(os.getenv("TTS_MAX_LOADED_VOICES", "2"))
+    # Voices load on first use and are dropped after this many idle seconds (0 = keep them).
+    idle_unload_s: float = float(os.getenv("TTS_IDLE_UNLOAD_S", "900"))
+    reaper_interval_s: float = float(os.getenv("IDLE_CHECK_INTERVAL_S", "30"))
     max_chars: int = int(os.getenv("MAX_TTS_CHARS", "1500"))
     languages: dict[str, Any] = field(default_factory=dict)
 
@@ -122,7 +127,8 @@ def create_app(
     if not s.languages:
         s.load_languages()
     cache: "OrderedDict[str, Any]" = OrderedDict()
-    lock = threading.Lock()
+    last_used: dict[str, float] = {}
+    lock = threading.Lock()  # one synthesis at a time (fixed CPU budget); also guards the cache
 
     def voice_path(name: str) -> Path:
         return Path(s.voices_dir) / f"{name}.onnx"
@@ -137,10 +143,36 @@ def create_app(
         v = voice_loader(path, s.threads)
         cache[name] = v
         while len(cache) > s.max_loaded_voices:
-            cache.popitem(last=False)
+            old, _ = cache.popitem(last=False)
+            last_used.pop(old, None)
         return v
 
-    app = FastAPI(title="koneqti-tts", docs_url=None, redoc_url=None)
+    def reap() -> list[str]:
+        """Drop voices unused for idle_unload_s. Never waits for a running synthesis."""
+        if s.idle_unload_s <= 0 or not lock.acquire(blocking=False):
+            return []
+        try:
+            now = time.monotonic()
+            gone = [n for n in cache if now - last_used.get(n, 0) >= s.idle_unload_s]
+            for n in gone:
+                del cache[n]
+                last_used.pop(n, None)
+        finally:
+            lock.release()
+        if gone:
+            release_memory()
+            jlog(event="voices_unloaded", voices=gone, idle_s=s.idle_unload_s)
+        return gone
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        reaper = Reaper(reap, s.reaper_interval_s).start() if s.idle_unload_s > 0 else None
+        yield
+        if reaper:
+            reaper.stop()
+
+    app = FastAPI(title="koneqti-tts", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.state.reap = reap
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -174,6 +206,7 @@ def create_app(
         with lock:  # one synthesis at a time: fixed CPU budget
             voice = get_voice(voice_name)
             wav_bytes = synth(voice, text, req.speed)
+            last_used[voice_name] = time.monotonic()
         seconds = wav_seconds(wav_bytes)
         try:
             audio = encoder(wav_bytes, fmt)
