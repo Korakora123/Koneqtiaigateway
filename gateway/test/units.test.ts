@@ -261,3 +261,30 @@ describe('usage store migration', () => {
     store.close();
   });
 });
+
+describe('language helpers', () => {
+  it('guesses language from script and common words', async () => {
+    const { guessLanguage, canonicalTag, sameLanguage } = await import('../src/lang.js');
+    expect(guessLanguage('آپ کا آرڈر تیار ہے').code).toBe('ur');
+    expect(guessLanguage('طلبك جاهز').code).toBe('ar');
+    expect(guessLanguage('आपका ऑर्डर तैयार है').code).toBe('hi');
+    expect(guessLanguage('Kya aap kal delivery kar sakte hain?').code).toBe('ur-Latn');
+    expect(guessLanguage('Can you deliver it tomorrow please?').code).toBe('en');
+    expect(guessLanguage('Hola, ¿pueden entregar mañana?').code).toBe('es');
+    expect(guessLanguage('Olá, vocês entregam amanhã?').code).toBe('pt');
+    expect(guessLanguage('👍 123').code).toBeNull();
+    expect(canonicalTag('ur-latn')).toBe('ur-Latn');
+    expect(canonicalTag('AR_eg')).toBe('ar-EG');
+    expect(sameLanguage('ar-EG', 'ar')).toBe(true);
+    expect(sameLanguage('ur', 'ur-Latn')).toBe(false);
+  });
+
+  it('decides the source language from model + guess', async () => {
+    const { decideSource } = await import('../src/routes/translate.js');
+    expect(decideSource('ur-Latn', { code: 'ur-Latn', strength: 0.5 })).toEqual({ lang: 'ur-Latn', confidence: 0.93 });
+    expect(decideSource('es', { code: null, strength: 0 })).toEqual({ lang: 'es', confidence: 0.75 });
+    expect(decideSource('hi', { code: 'ur', strength: 0.95 })).toEqual({ lang: 'ur', confidence: 0.6 });
+    expect(decideSource('hi-Latn', { code: 'ur-Latn', strength: 0.4 })).toEqual({ lang: 'hi-Latn', confidence: 0.55 });
+    expect(decideSource(null, { code: null, strength: 0 })).toEqual({ lang: null, confidence: 0 });
+  });
+});

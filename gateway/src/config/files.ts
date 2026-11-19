@@ -97,7 +97,15 @@ export type TaskConfig = z.infer<typeof TaskSchema>;
 export type TasksFile = z.infer<typeof TasksFileSchema>;
 export type LimitsFile = z.infer<typeof LimitsFileSchema>;
 export type TtsFile = z.infer<typeof TtsFileSchema>;
+const TranslateFileSchema = z.object({
+  languages: z.record(z.string(), z.string().min(1)),
+  limits: z.object({ max_texts: z.number().int().positive(), max_total_chars: z.number().int().positive() }),
+  contexts: z.object({ chat: z.string(), call: z.string() }),
+  system_prompt: z.string().min(1),
+});
+
 export type SafetyFile = z.infer<typeof SafetyFileSchema>;
+export type TranslateFile = z.infer<typeof TranslateFileSchema>;
 export type RateLimit = z.infer<typeof RateSchema>;
 
 export interface FileConfig {
@@ -105,6 +113,7 @@ export interface FileConfig {
   limits: LimitsFile;
   tts: TtsFile;
   safety: SafetyFile;
+  translate: TranslateFile;
 }
 
 function loadYaml<T>(dir: string, file: string, schema: z.ZodType<T>): T {
@@ -129,6 +138,7 @@ export function loadFileConfig(dir: string): FileConfig {
     limits: loadYaml(dir, 'limits.yaml', LimitsFileSchema),
     tts: loadYaml(dir, 'tts_languages.yaml', TtsFileSchema),
     safety: loadYaml(dir, 'safety.yaml', SafetyFileSchema),
+    translate: loadYaml(dir, 'translate.yaml', TranslateFileSchema),
   };
 }
 

@@ -44,6 +44,7 @@ deployment to the CloudPanel VPS and the on-server acceptance checks are the nex
 | `POST /v1/chat/completions` | `X-Task` required; OpenAI body (`model` ignored); `stream`; `response_format` json_object/json_schema (validated with ajv → 502 `schema_validation_failed`); prompt > `MAX_CONTEXT_TOKENS` → 400 |
 | `POST /v1/audio/transcriptions` | multipart `file` ≤ 25 MB (ogg/opus, wav 8/16 kHz, m4a, mp3, webm), optional `language` → `{text, language, language_probability, confidence, duration_sec}` |
 | `POST /v1/audio/speech` | `{input, language (BCP-47), voice?, format: ogg_opus·mp3·mulaw_8k·pcm_16k·wav, speed?}`; unknown language (incl. `ur-Latn`) → 422 `tts_language_unavailable`; `stream:true` → 501 (Part 4) |
+| `POST /v1/translate` | `{texts[] (≤ 20, ≤ 4000 chars), from: auto\|bcp47, to, context: chat\|call}` → `{texts, from_detected, confidence, model}`. Languages in `config/translate.yaml` (incl. `ur-Latn`, `hi-Latn`, `ar-EG/SA/AE`); others → 422. Per-text cache per business (7 days). `call` = realtime (503 at once when busy) |
 | `POST /v1/safety/classify` | `{text ≤ 1000, language?}` → `{category, score, model}`; 1.5 s budget → 503 so the product uses its keyword filter |
 | `GET /v1/usage?subtenant=&from=&to=` | `by_task` totals for one business, or the whole tenant |
 | `GET/PUT /v1/subtenants/:id/settings`, `DELETE /v1/subtenants/:id/data` | `{retention_days, allow_cache}`; delete removes the business's ledger rows + settings |
@@ -73,7 +74,7 @@ See `.env.example`.
 | Suite | Result |
 |---|---|
 | `npm --prefix gateway run typecheck` | ✅ clean (strict) |
-| `npm --prefix gateway test` (vitest) | ✅ 46 passed — answer cache (hit/miss/off, per business, deleted with the business), queue priorities (realtime instant 503, fast jobs, batch gating), deadlines, auth, tenant/subtenant contract, subtenant limits, usage per business, settings/delete, chat + streaming, JSON schema, 503 + Retry-After, no text in logs, audio routes + formats, 422/501, health, DB migration |
+| `npm --prefix gateway test` (vitest) | ✅ 54 passed — translate (auto-detect, per-text cache, same-language shortcut, validation, realtime call), answer cache (hit/miss/off, per business, deleted with the business), queue priorities (realtime instant 503, fast jobs, batch gating), deadlines, auth, tenant/subtenant contract, subtenant limits, usage per business, settings/delete, chat + streaming, JSON schema, 503 + Retry-After, no text in logs, audio routes + formats, 422/501, health, DB migration |
 | `pytest services/speech` | ✅ 18 passed (incl. lazy load / idle unload) (fake model + real decoding of wav 8/16/44.1 kHz, ogg/opus, mp3, m4a, webm) |
 | `pytest services/tts` | ✅ 17 passed (incl. idle voice unload) (fake voice; real ffmpeg for ogg_opus/mp3/mulaw_8k/pcm_16k; Urdu→Devanagari) |
 | `npm --prefix sdk test`, `npm --prefix evals test` | ✅ 5 + 4 passed |
@@ -138,8 +139,13 @@ Only a sha256 of the request is stored, never the prompt; answers expire and are
 - Rate limits and queues are in-memory (single gateway process, Stage 0). Restarting the gateway
   answers queued requests with 503.
 - Tool calling, images and `n > 1` are rejected in Stage 0.
-- Not built from the handover yet: voice cloning (needs licence-checked models), `/v1/translate`,
-  live-call streaming (Part 4), the 8 kHz WER report. Master-spec router/ledger costs/cache: see `GATEWAY_AUDIT.md`.
+- Not built from the handover yet: voice cloning (needs licence-checked models), live-call
+  streaming (Part 4), the 8 kHz WER report.
+- `/v1/translate` quality per language is unmeasured: run `npm --prefix evals run eval -- --only translate`
+  on VPS2 (Roman Urdu and Arabic dialects first). `confidence` is not a model probability: it says
+  whether the model's language answer and a script/word check agree (agree ≈ 0.85–0.98, disagree 0.55–0.6).
+- `context: "call"` translation is realtime with a 2 s budget; on the shared CPU expect 503s until
+  live calls get their own workers (Part 4). Master-spec router/ledger costs/cache: see `GATEWAY_AUDIT.md`.
 - Safety in 1.5 s on the Stage 0 CPU is unproven — expect 503s (keyword filter) until benchmarked.
 - Limits are still 3.5 CPU / 6 GB from the first server. VPS2 has 24 GB but shares it with every
   backend; raising them needs the owner's written OK after the benchmark (see GATEWAY_AUDIT §8.4).

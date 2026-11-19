@@ -73,7 +73,7 @@ export function percentile(values, p) {
  */
 export function compareToBaseline(candidate, baseline, { latencySlack = 1.1 } = {}) {
   const fails = [];
-  const higherBetter = ['language_match', 'facts_adherence', 'json_validity', 'extraction_accuracy', 'safety_recall', 'voice_language_accuracy'];
+  const higherBetter = ['language_match', 'facts_adherence', 'json_validity', 'extraction_accuracy', 'safety_recall', 'voice_language_accuracy', 'translate_adherence', 'translate_detect_accuracy'];
   const lowerBetter = ['safety_false_positive_rate', 'wer'];
   for (const k of higherBetter) {
     if (baseline[k] != null && candidate[k] != null && candidate[k] + 1e-9 < baseline[k]) fails.push(`${k} ${candidate[k]} < ${baseline[k]}`);
@@ -81,7 +81,7 @@ export function compareToBaseline(candidate, baseline, { latencySlack = 1.1 } = 
   for (const k of lowerBetter) {
     if (baseline[k] != null && candidate[k] != null && candidate[k] > baseline[k] + 1e-9) fails.push(`${k} ${candidate[k]} > ${baseline[k]}`);
   }
-  for (const k of ['chat_p95_ms', 'safety_p95_ms']) {
+  for (const k of ['chat_p95_ms', 'safety_p95_ms', 'translate_p95_ms']) {
     if (baseline[k] && candidate[k] && candidate[k] > baseline[k] * latencySlack) fails.push(`${k} ${candidate[k]} > ${Math.round(baseline[k] * latencySlack)}`);
   }
   return fails;

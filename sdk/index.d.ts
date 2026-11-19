@@ -49,5 +49,9 @@ export declare class KoneqtiAI {
     audio: Uint8Array | Blob,
     opts: CallOptions & { language?: string; filename?: string },
   ): Promise<{ text: string; language: string; language_probability: number; confidence: number; duration_sec: number; meta: Meta }>;
+  translate(
+    texts: string[],
+    opts: CallOptions & { to: string; from?: string; context?: 'chat' | 'call' },
+  ): Promise<{ texts: string[]; from_detected: string | null; confidence: number; model: string; meta: Meta }>;
   speech(text: string, opts: CallOptions & { language: string; voice?: string; speed?: number; format?: 'ogg_opus' | 'mp3' | 'mulaw_8k' | 'pcm_16k' | 'wav' }): Promise<{ audio: Buffer; contentType: string | null; meta: Meta }>;
 }

@@ -24,6 +24,7 @@ import { registerSafety } from './routes/safety.js';
 import { registerModels, registerUsage } from './routes/models.js';
 import { registerHealth } from './routes/health.js';
 import { registerSubtenants } from './routes/subtenants.js';
+import { registerTranslate } from './routes/translate.js';
 
 export interface BuildOptions {
   env: Env;
@@ -236,6 +237,7 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
   registerTranscriptions(app, deps);
   registerSpeech(app, deps);
   registerSafety(app, deps);
+  registerTranslate(app, deps);
   registerVoices(app, deps);
   registerEmbeddings(app);
 

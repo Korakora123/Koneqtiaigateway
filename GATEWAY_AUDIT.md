@@ -133,7 +133,7 @@ Smaller conflicts to confirm:
 | 17.1 | Transcription: formats incl. 8 kHz, `duration_sec` | exists (Part 1) | WER-at-8 kHz report still to do |
 | 17.1 | Speech: `ogg_opus · mp3 · mulaw_8k · pcm_16k`, `stream:true` | partial | formats done; `stream` → 501 until Part 4 |
 | 17.1 | Safety ≤ 1000 chars, < 1.5 s | exists (Part 1) | latency to be measured |
-| 17.1 | `POST /v1/translate` | missing | `translate.draft` exists as a chat task only |
+| 17.1 | `POST /v1/translate` | exists | handover §3 body; quality not yet measured |
 | 17.1 | `WS /v1/realtime/transcribe` | missing | needs streaming ASR |
 | 17.1 | Voices API (consent sentence, multipart create, list, delete) | missing | different paths from today's `/v1/voices/:business_id` (501) |
 | 17.1 | `GET /v1/usage?subtenant=&from=&to=` | exists (Part 1) | |
@@ -216,7 +216,7 @@ No product calls the gateway in production yet (not deployed). MesgAI has been t
 | Item | Why / what's needed |
 |---|---|
 | §2.2 voice cloning with consent + speaker check | Needs model choice with **commercial** licences (cloning + speaker verification) and CPU feasibility — owner decision. v3 spec planned Chatterbox on GPU (Stage 2) |
-| §3 `/v1/translate` | Next (local Qwen3-4B + per-subtenant cache). `ur-Latn` quality to be measured |
+| §3 `/v1/translate` | ✅ built (local Qwen3-4B, per-business per-text cache, BCP-47 incl. `ur-Latn`/`hi-Latn`, auto-detect with confidence). Quality per language to be measured with `evals --only translate` |
 | §4 live transcribe WS, streaming TTS, per-turn timings | Last. Needs streaming ASR; not on the shared Stage 0 server |
 | 8 kHz vs 16 kHz WER report | Needs a recorded test set (Urdu, Arabic, English, Spanish, Roman Urdu code-switching) |
 

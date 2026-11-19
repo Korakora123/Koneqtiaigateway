@@ -42,5 +42,8 @@ tasks:
   summary:          { model: qwen3-4b, priority: batch }
   seo.content:      { model: qwen3-4b, priority: batch }       # Stage 1: qwen3-8b on demand
   translate.draft:  { model: qwen3-4b, priority: batch }
+  # POST /v1/translate (handover §3): inbox messages and live-call phrases
+  translate.chat:   { model: qwen3-4b, priority: normal, timeout_ms: 15000, temperature: 0, cache_ttl_s: 604800 }
+  translate.call:   { model: qwen3-4b, priority: realtime, timeout_ms: 2000, temperature: 0, cache_ttl_s: 604800 }
   transcribe:       { service: speech, model: whisper-small-int8, priority: normal, timeout_ms: 60000 }
   tts:              { service: tts, model: piper, priority: normal, timeout_ms: 20000, languages: config/tts_languages.yaml }

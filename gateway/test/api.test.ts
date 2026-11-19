@@ -532,3 +532,86 @@ describe('per-business answer cache (master §5)', () => {
     expect(h.ollama.requests.filter((q) => q.url === '/api/chat').length).toBe(2);
   });
 });
+
+describe('POST /v1/translate (handover §3)', () => {
+  const tr = (payload: Record<string, unknown>, extra: Record<string, string> = {}) =>
+    h.app.inject({ method: 'POST', url: '/v1/translate', headers: authHeaders(undefined, extra), payload });
+  const modelSays = (source: string, translations: string[]) => ollamaReply(JSON.stringify({ source_language: source, translations }));
+
+  it('Roman Urdu → English with auto-detect; ur-Latn is first-class', async () => {
+    h = await harness();
+    h.ollama.handler = modelSays('ur-Latn', ['Can you deliver tomorrow?']);
+    const r = await tr({ texts: ['Kya aap kal delivery kar sakte hain?'], from: 'auto', to: 'en', context: 'chat' });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ texts: ['Can you deliver tomorrow?'], from_detected: 'ur-Latn', model: 'qwen3-4b' });
+    expect(r.json().confidence).toBeGreaterThanOrEqual(0.85); // model and word-guess agree
+    const sent = h.ollama.lastJson<{ messages: Array<{ content: string }>; options: { temperature: number } }>();
+    expect(sent.messages[0]!.content).toContain('into English [en]');
+    expect(sent.messages[0]!.content).toContain('WhatsApp');
+    expect(sent.options.temperature).toBe(0);
+    expect(h.logs.text).not.toContain('delivery kar');
+    expect(h.logs.text).toContain('"task":"translate.chat"');
+  });
+
+  it('batch of texts, per-text cache: only new texts go to the model', async () => {
+    h = await harness();
+    h.ollama.handler = modelSays('es', ['Hello', 'Thanks']);
+    const a = await tr({ texts: ['Hola', 'Gracias'], from: 'es', to: 'en' });
+    expect(a.json().texts).toEqual(['Hello', 'Thanks']);
+    expect(a.headers['x-kq-cache']).toBe('miss');
+    h.ollama.handler = modelSays('es', ['Tomorrow']);
+    const b = await tr({ texts: ['Hola', 'Mañana', 'Gracias'], from: 'es', to: 'en' });
+    expect(b.json()).toMatchObject({ texts: ['Hello', 'Tomorrow', 'Thanks'], from_detected: 'es', confidence: 1 });
+    expect(JSON.parse(h.ollama.lastJson<{ messages: Array<{ content: string }> }>().messages[1]!.content)).toEqual(['Mañana']);
+    const calls = h.ollama.requests.length;
+    const c = await tr({ texts: ['Gracias'], from: 'es', to: 'en' });
+    expect(c.headers['x-kq-cache']).toBe('hit');
+    expect(h.ollama.requests.length).toBe(calls);
+    // another business never gets these
+    expect((await tr({ texts: ['Gracias'], from: 'es', to: 'en' }, { 'x-kq-subtenant': 'biz-other' })).headers['x-kq-cache']).toBe('miss');
+  });
+
+  it('same language in and out → returned unchanged without a model call; region ignored', async () => {
+    h = await harness();
+    const r = await tr({ texts: ['مرحبا'], from: 'ar-EG', to: 'ar-SA' });
+    expect(r.json()).toMatchObject({ texts: ['مرحبا'], confidence: 1 });
+    expect(h.ollama.requests.filter((q) => q.url === '/api/chat')).toHaveLength(0);
+    // but Urdu script → Roman Urdu is a real translation (different script)
+    h.ollama.handler = modelSays('ur', ['aap ka order tayyar hai']);
+    expect((await tr({ texts: ['آپ کا آرڈر تیار ہے'], from: 'ur', to: 'ur-Latn' })).json().texts).toEqual(['aap ka order tayyar hai']);
+  });
+
+  it('script evidence beats a wrong model guess (lower confidence)', async () => {
+    h = await harness();
+    h.ollama.handler = modelSays('hi', ['Your order is ready']);
+    const r = await tr({ texts: ['آپ کا آرڈر تیار ہے'], to: 'en' });
+    expect(r.json()).toMatchObject({ from_detected: 'ur', confidence: 0.6 });
+  });
+
+  it('validation: unsupported language 422, too many / too long 413, wrong count from model 502', async () => {
+    h = await harness();
+    expect((await tr({ texts: ['x'], to: 'xx' })).json().error.code).toBe('language_unsupported');
+    expect((await tr({ texts: ['x'], from: 'zz', to: 'en' })).statusCode).toBe(422);
+    expect((await tr({ texts: Array(21).fill('x'), to: 'en' })).json().error.code).toBe('too_many_texts');
+    expect((await tr({ texts: ['a'.repeat(4001)], to: 'en' })).statusCode).toBe(413);
+    h.ollama.handler = modelSays('es', ['only one']);
+    expect((await tr({ texts: ['uno', 'dos'], from: 'es', to: 'en' })).statusCode).toBe(502);
+  });
+
+  it('context "call" runs as realtime: 503 at once when no worker is free', async () => {
+    h = await harness();
+    h.ollama.handler = ollamaReply('ok', { delayMs: 300 });
+    const fill = [0, 1].map((i) =>
+      h.app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: authHeaders('reply', { 'x-kq-subtenant': `f${i}` }),
+        payload: { messages: [{ role: 'user', content: 'x' }] },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    const r = await tr({ texts: ['Kal aa jayenge'], to: 'en', context: 'call' });
+    expect(r.statusCode).toBe(503);
+    await Promise.all(fill);
+  });
+});

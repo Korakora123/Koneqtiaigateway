@@ -151,6 +151,23 @@ export class KoneqtiAI {
     return { ...(await res.json()), meta: meta(res) };
   }
 
+  /**
+   * Translate texts (BCP-47 codes, e.g. 'ur-Latn' for Roman Urdu).
+   * → {texts, from_detected, confidence}. context 'call' runs as realtime (503 at once when busy).
+   */
+  async translate(texts, opts) {
+    const res = await this.request(
+      '/v1/translate',
+      {
+        method: 'POST',
+        headers: this.headers(opts),
+        body: JSON.stringify({ texts, from: opts.from ?? 'auto', to: opts.to, context: opts.context ?? 'chat' }),
+      },
+      opts,
+    );
+    return { ...(await res.json()), meta: meta(res) };
+  }
+
   /** Voice note → {text, language, confidence, duration_sec}. `audio` is a Buffer/Uint8Array/Blob. */
   async transcribe(audio, opts) {
     const form = new FormData();

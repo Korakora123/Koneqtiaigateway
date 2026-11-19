@@ -61,3 +61,12 @@ test('chatStream yields deltas', async () => {
   for await (const d of ai.chatStream('reply', { messages: [] }, { tenant: 't' })) text += d;
   assert.equal(text, 'Ji haan');
 });
+
+test('translate posts texts with defaults from=auto, context=chat', async () => {
+  const f = fakeFetch([{ status: 200, body: { texts: ['Hello'], from_detected: 'ur-Latn', confidence: 0.9 } }]);
+  const ai = new KoneqtiAI({ url: 'http://gw', key: 'k', fetch: f });
+  const out = await ai.translate(['Salam'], { subtenant: 'b', to: 'en' });
+  assert.deepEqual(out.texts, ['Hello']);
+  assert.equal(f.calls[0].url, 'http://gw/v1/translate');
+  assert.deepEqual(JSON.parse(f.calls[0].init.body), { texts: ['Salam'], from: 'auto', to: 'en', context: 'chat' });
+});

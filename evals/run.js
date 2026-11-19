@@ -2,7 +2,7 @@
 // Runs the eval sets through the gateway (spec §8.1) and writes results/<date>.json.
 //   AI_GATEWAY_KEY=... npm --prefix evals run eval
 //   AI_GATEWAY_KEY=... npm --prefix evals run eval -- --baseline results/2026-10-01T0100.json
-// Options: --url http://127.0.0.1:8787  --only chat,extract,safety,voice  --safety-threshold 0.5
+// Options: --url http://127.0.0.1:8787  --only chat,extract,safety,translate,voice  --safety-threshold 0.5
 // A model switch is allowed only if every metric is equal or better and latency is within budget.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -17,7 +17,7 @@ const opt = (n, d) => {
 };
 const URL_ = opt('url', process.env.AI_GATEWAY_URL ?? 'http://127.0.0.1:8787');
 const KEY = process.env.AI_GATEWAY_KEY;
-const ONLY = new Set(String(opt('only', 'chat,extract,safety,voice')).split(','));
+const ONLY = new Set(String(opt('only', 'chat,extract,safety,translate,voice')).split(','));
 const THRESH = Number(opt('safety-threshold', 0.5));
 const BASELINE = opt('baseline');
 if (!KEY) {
@@ -36,6 +36,7 @@ const headers = (task) => ({
   authorization: `Bearer ${KEY}`,
   'content-type': 'application/json',
   'x-kq-subtenant': 'evals',
+  'x-kq-cache': 'off', // measure the model, not the cache
   ...(task ? { 'x-task': task } : {}),
 });
 
@@ -142,6 +143,36 @@ if (ONLY.has('safety')) {
   out.metrics.safety_false_positive_rate = rate(fps);
   out.metrics.safety_p95_ms = Math.round(percentile(lat, 95));
   out.metrics.safety_busy_503 = busy;
+}
+
+if (ONLY.has('translate')) {
+  const items = readJsonl(join(HERE, 'data/translate.jsonl'));
+  const ok = [];
+  const det = [];
+  const lat = [];
+  for (const it of items) {
+    // run each item twice: with the source given, and with from=auto (detection accuracy)
+    const r = await post('/v1/translate', { texts: [it.text], from: it.from, to: it.to, context: 'chat' });
+    const a = await post('/v1/translate', { texts: [it.text], from: 'auto', to: it.to, context: 'chat' });
+    if (r.status !== 200) {
+      ok.push(false);
+      out.failures.push({ id: it.id, status: r.status });
+      continue;
+    }
+    lat.push(r.ms);
+    const text = r.data.texts[0];
+    const good = includesFacts(text, it.must_include_any);
+    ok.push(good);
+    const detOk = a.status === 200 && a.data.from_detected?.split('-')[0] === it.from.split('-')[0] &&
+      (a.data.from_detected.includes('Latn') === it.from.includes('Latn'));
+    det.push(detOk);
+    if (!good || !detOk) out.failures.push({ id: it.id, content_ok: good, detected: a.data?.from_detected, detect_ok: detOk });
+    process.stdout.write(good && detOk ? '.' : 'x');
+  }
+  console.log(' translate');
+  out.metrics.translate_adherence = rate(ok);
+  out.metrics.translate_detect_accuracy = rate(det);
+  out.metrics.translate_p95_ms = Math.round(percentile(lat, 95));
 }
 
 if (ONLY.has('voice')) {

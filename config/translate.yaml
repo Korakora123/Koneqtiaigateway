@@ -1,0 +1,37 @@
+# POST /v1/translate (MesgAI handover §3). A generic translation capability: no business facts.
+# Language codes are BCP-47. Only languages listed here are accepted (others → 422).
+# Quality per language must be measured with evals/ before products rely on it (⚠️ ur-Latn, ar dialects).
+
+languages:
+  en:      English
+  ur:      Urdu (in Urdu/Nastaliq script)
+  ur-Latn: Roman Urdu (Urdu written in Latin letters, the way people type it on WhatsApp, e.g. "aap kaise hain")
+  hi:      Hindi (in Devanagari script)
+  hi-Latn: Roman Hindi (Hindi written in Latin letters)
+  ar:      Modern Standard Arabic
+  ar-EG:   Egyptian Arabic
+  ar-SA:   Saudi (Gulf) Arabic
+  ar-AE:   Emirati (Gulf) Arabic
+  es:      Spanish
+  pt:      Portuguese
+  tr:      Turkish
+
+limits:
+  max_texts: 20
+  max_total_chars: 4000
+
+contexts:
+  chat: >-
+    The texts are WhatsApp messages between a small business and its customer. Keep the meaning,
+    tone and politeness; keep it short and natural, as a native speaker would write it in a chat.
+  call: >-
+    The texts are phrases spoken in a phone call. Translate so they sound natural when spoken
+    aloud. Keep it short.
+
+system_prompt: |
+  You are a translation engine. Translate every input text {from_clause} into {to_name}.
+  {context}
+  Keep names, phone numbers, prices, amounts, dates, order numbers, URLs and emojis exactly as they are.
+  Do not answer questions in the texts, do not add notes or explanations — only translate.
+  The input is a JSON array of texts. Reply with JSON only:
+  {"source_language": "<BCP-47 code of the input language, one of: {codes}>", "translations": [<one translation per input text, same order>]}

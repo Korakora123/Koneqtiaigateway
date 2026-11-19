@@ -1,0 +1,11 @@
+{"id": "t-rur-1", "from": "ur-Latn", "to": "en", "text": "Kya aap kal delivery kar sakte hain?", "must_include_any": [["deliver"], ["tomorrow"]]}
+{"id": "t-rur-2", "from": "ur-Latn", "to": "en", "text": "Mera order abhi tak nahi aaya, please check karein.", "must_include_any": [["order"], ["not", "yet", "hasn't", "has not"]]}
+{"id": "t-en-rur", "from": "en", "to": "ur-Latn", "text": "Your order will arrive tomorrow at 5 pm.", "must_include_any": [["order"], ["kal"], ["5"]]}
+{"id": "t-ur-en", "from": "ur", "to": "en", "text": "آپ کا آرڈر کل تک پہنچ جائے گا۔", "must_include_any": [["order"], ["tomorrow"]]}
+{"id": "t-en-ur", "from": "en", "to": "ur", "text": "Thank you, your booking is confirmed.", "must_include_any": [["شکریہ"], ["بکنگ"]]}
+{"id": "t-ar-en", "from": "ar", "to": "en", "text": "هل يمكنكم التوصيل غداً؟", "must_include_any": [["deliver"], ["tomorrow"]]}
+{"id": "t-aren-eg", "from": "ar-EG", "to": "en", "text": "ممكن أعرف الطلب هيوصل امتى؟", "must_include_any": [["order"], ["when", "arrive"]]}
+{"id": "t-en-ar", "from": "en", "to": "ar", "text": "The price is 250 AED including delivery.", "must_include_any": [["250"]]}
+{"id": "t-es-en", "from": "es", "to": "en", "text": "¿Pueden entregar el pedido mañana por la mañana?", "must_include_any": [["deliver"], ["tomorrow"], ["morning"]]}
+{"id": "t-en-es", "from": "en", "to": "es", "text": "Your appointment is on Monday at 10 am.", "must_include_any": [["lunes"], ["10"]]}
+{"id": "t-pt-en", "from": "pt", "to": "en", "text": "Vocês entregam no domingo?", "must_include_any": [["deliver"], ["sunday"]]}
