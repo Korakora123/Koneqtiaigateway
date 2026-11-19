@@ -12,6 +12,15 @@ Updated with `MESGAI_GATEWAY_HANDOVER.md` (§7 below) and the owner's scope answ
 
 ## 1. Decisions the owner must make first (blocking)
 
+**Owner answers (19 Nov 2026):**
+- **D1 → no cloud providers now.** Focus is our own VPS. Cloud (T2/T3, BYOK) may come later as an
+  optional, flagged extra; golden rule 1 in `CLAUDE.md` stays as it is until then.
+- **D2 → keep prompts and business facts in the products** (recommended, owner had no preference).
+  Gateway "profiles" = routing only (model, priority, timeout, limits, format) — what `tasks.yaml` is.
+- **D3 → SQLite stays inside the gateway for now** (recommendation, see §8.3); Postgres/Redis only
+  when we run more than one gateway process or server.
+- **D4 → resolved** by the MesgAI handover.
+
 The master spec changes four rules that `CLAUDE.md` (the repo's binding rules) and
 `KONEQTI_AI_GATEWAY.md` v3 still say. I can't build those parts until `CLAUDE.md` is updated,
 because it is written as "never break" and overrides other instructions in this repo.
@@ -220,3 +229,50 @@ All items in handover §7 are already in `KONEQTI_GATEWAY_MASTER.md` (§3.1, §8
 5. **Stock voices.** `voice` = the Piper voice listed in `GET /v1/models` → `tts_languages`. Roman Urdu (`ur-Latn`) has no voice → `422 tts_language_unavailable` → send text.
 6. **`stream: true`** → `501 stream_not_available_yet` until Part 4.
 7. **Realtime on the current server:** no reserved workers (no live calls in Stage 0), so `realtime` gets a worker only if one is free, else `503` at once.
+
+---
+
+## 8. Optimising our own VPS (local-only plan)
+
+Without cloud tiers, the master spec's router becomes: **T0** (cache / rules) → **T1** (local
+models), and the savings come from doing less work per request on the same CPU.
+
+### 8.1 Where the time goes (why this order)
+On CPU, reading the prompt ("prefill") is usually slower than writing the reply. MesgAI sends up
+to ~900 tokens of context. At an assumed 30–60 tokens/s prefill on ~3 cores 💲 that is 15–30 s
+before the first reply word — the whole 25 s budget. A reply of 100–150 tokens at 8–15 tok/s adds
+10–15 s more. So: **cut and reuse prompt work first**, then make the model itself faster.
+
+### 8.2 Steps, cheapest first (each one measured with `bench/` before it stays)
+| # | Change | Expected effect 💲 | Where |
+|---|---|---|---|
+| 1 | **Measure prefill and generation separately**, with a realistic 900-token MesgAI prompt (today bench uses a short prompt) | tells us which of the steps below matter | `bench/`, gateway `X-Usage` |
+| 2 | **Prompt order for reuse:** fixed part first (instructions + business facts), changing part last (summary, last messages). Ollama/llama.cpp then reuse the cached start of the prompt | prefill cost only for the new tail of a conversation | MesgAI brain (product) — gateway documents the rule |
+| 3 | **Exact cache per business** (master §5): same task + same messages + low temperature → stored answer. Safety/intent/extraction repeat a lot | repeats answered in milliseconds, cost 0 | gateway, SQLite, honours `allow_cache` |
+| 4 | **Right-size models per task:** small model (Qwen3-1.7B Q4, ~1.2 GB) for `classify.safety` / `classify.intent`; Qwen3-4B for replies. Needs `OLLAMA_MAX_LOADED_MODELS=2` and RAM check inside the 4.4 GB Ollama limit | safety within 1.5 s becomes realistic | `tasks.yaml` (+ evals: switch only if quality holds) |
+| 5 | **Business prompt cache on disk:** llama.cpp server can save/restore the processed prompt per business (`--slot-save-path`), so a returning business skips most prefill even after other traffic | large win when many businesses share 2 slots | engine swap Ollama → llama.cpp server (same model files); only if step 1 shows prefill dominates |
+| 6 | **Engine tuning:** threads = real cores, quant type (Q4_K_M vs Q4_0), flash-attention, KV-cache quantisation, `num_ctx` 2048 for short tasks | 10–30 % each, hardware-dependent | `tasks.yaml` / compose; bench each |
+| 7 | **Speculative decoding** with Qwen3-0.6B as draft for 4B (llama.cpp) | sometimes 1.3–2× generation on CPU, sometimes nothing | experiment after 5 |
+| 8 | **Batch work off-peak only** (already built) + KoneqtiSEO/BlogBot jobs through an async lane later | daytime CPU kept for chat | built / Phase 3 |
+| 9 | **Hardware check:** AVX2/AVX-512 support, shared vs dedicated vCPU (master §8.8). A dedicated-CPU server can beat a bigger shared one | decides Stage 1 purchase | `bench/` on each server |
+| 10 | **Ledger with measured local cost:** cost per request = server cost ÷ measured throughput; baseline = what a public API would have charged → monthly savings report per product (master §10, without any cloud call) | the sales number | gateway ledger |
+
+Speech: Whisper `small` int8, beam 1, VAD already on; voice notes are short. Keep, measure
+real-time factor in step 1. TTS (Piper) is already fast on CPU.
+
+### 8.3 Storage choice (D3)
+| Option | For | Against |
+|---|---|---|
+| **SQLite in the gateway (chosen for now)** | no extra RAM or service, no network hop on every request, ledger + cache are small (thousands of rows/day), nothing else can slow it down | one gateway process only |
+| Reuse KoneqtiSEO's Postgres/Redis/ClickHouse on VPS2 | one place for data, ClickHouse good for reports | every AI request then depends on VPS2 and its load (SEO agents); network hop; mixes products' data and failures |
+| New Postgres + Redis for the gateway | master-spec stack, many gateway processes | ~0.5–1 GB RAM taken from the model inside the 6 GB cap |
+
+Move when: more than one gateway process/server, or ledger reports get heavy → Postgres (and
+optionally ship daily ledger summaries to the existing ClickHouse for dashboards). Storage is
+behind `UsageStore`, so the switch is one module.
+
+### 8.4 Open question for the owner
+**Which server will the gateway run on?** The v3 spec says the shared CloudPanel server
+(6 vCPU / 12 GB, 3.5 CPU / 6 GB cap). The handover says the MesgAI brain is on VPS2 and the
+owner says VPS1 = dashboard, VPS2 = backend + agents (KoneqtiSEO with Postgres/Redis/ClickHouse).
+The limits, the steps above and the storage choice depend on the answer.
