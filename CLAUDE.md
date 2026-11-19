@@ -8,10 +8,12 @@ BlogBot, PinForge). Full spec: `KONEQTI_AI_GATEWAY.md`. Scaling rules:
 ## 1. Golden rules (never break)
 1. **Local models only.** Never add calls to external AI APIs (Claude, OpenAI,
    DeepSeek, Gemini, Groq, OpenRouter, etc.). No API keys for them anywhere.
-2. **Stage 0 runs on a shared production server** (Linux, 6 vCPU, 12 GB, CloudPanel
-   with live WordPress sites):
-   - Never modify CloudPanel, MySQL, PHP-FPM, existing site files or existing nginx
-     configs.
+2. **Stage 0 runs on VPS2, a shared production server** (Linux, 24 GB RAM) that also runs
+   every Koneqti product backend and their lazy-loaded agents (KoneqtiSEO with
+   Postgres/Redis/ClickHouse, MesgAI brain, …). CloudPanel is installed there but unused;
+   deploys are done from the command line. VPS1 (12 GB) holds the sites and dashboards.
+   - Never modify CloudPanel, other products' services, databases (Postgres, Redis,
+     ClickHouse, MySQL), existing site files or existing nginx configs.
    - nginx: **new file only**, always run `nginx -t` before `systemctl reload nginx`.
      Never restart nginx or MySQL.
    - All AI services run in Docker with hard limits (`cpus: 3.5`, `mem_limit: 6g`
@@ -80,7 +82,7 @@ Never commit secrets; `.env.example` only.
 ## 7. Definition of done (every task)
 - Types pass, tests pass, `docker compose up` works with limits in place.
 - Acceptance tests in the spec for that part pass.
-- Spot-check that CloudPanel sites still respond normally under AI load.
+- Spot-check that the other product backends on VPS2 still respond normally under AI load.
 - STATUS.md updated: what changed, env vars, benchmarks, owner manual steps, known gaps.
 
 ## 8. Commands

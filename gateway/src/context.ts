@@ -19,6 +19,9 @@ export interface RequestCtx {
   tokensIn: number;
   tokensOut: number;
   evalMs: number;
+  promptMs: number;
+  /** Answer cache result: hit | miss | off | '' (not cacheable). */
+  cache: string;
   audioSeconds: number;
   chars: number;
   stream: boolean;
@@ -49,6 +52,8 @@ export function newCtx(requestId: string): RequestCtx {
     tokensIn: 0,
     tokensOut: 0,
     evalMs: 0,
+    promptMs: 0,
+    cache: '',
     audioSeconds: 0,
     chars: 0,
     stream: false,
@@ -61,6 +66,7 @@ export function newCtx(requestId: string): RequestCtx {
 export function usageHeader(ctx: RequestCtx): string {
   const parts: string[] = [];
   if (ctx.tokensIn || ctx.tokensOut) parts.push(`tokens_in=${ctx.tokensIn}`, `tokens_out=${ctx.tokensOut}`);
+  if (ctx.promptMs) parts.push(`prompt_ms=${ctx.promptMs}`);
   if (ctx.evalMs) parts.push(`eval_ms=${ctx.evalMs}`);
   if (ctx.audioSeconds) parts.push(`audio_seconds=${ctx.audioSeconds.toFixed(2)}`);
   if (ctx.chars) parts.push(`chars=${ctx.chars}`);

@@ -27,6 +27,10 @@ const TaskSchema = z.object({
   timeout_ms: z.number().int().positive().optional(),
   max_tokens: z.number().int().positive().optional(),
   json_schema: z.boolean().default(false),
+  /** Default temperature when the caller sends none (routing parameter, not a prompt). */
+  temperature: z.number().min(0).max(2).optional(),
+  /** > 0 → identical requests (temperature ≤ 0.3) are answered from the per-business cache for this long. */
+  cache_ttl_s: z.number().int().nonnegative().default(0),
   languages: z.string().optional(),
 });
 

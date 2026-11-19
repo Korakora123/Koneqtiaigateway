@@ -271,8 +271,22 @@ Move when: more than one gateway process/server, or ledger reports get heavy →
 optionally ship daily ledger summaries to the existing ClickHouse for dashboards). Storage is
 behind `UsageStore`, so the switch is one module.
 
-### 8.4 Open question for the owner
-**Which server will the gateway run on?** The v3 spec says the shared CloudPanel server
-(6 vCPU / 12 GB, 3.5 CPU / 6 GB cap). The handover says the MesgAI brain is on VPS2 and the
-owner says VPS1 = dashboard, VPS2 = backend + agents (KoneqtiSEO with Postgres/Redis/ClickHouse).
-The limits, the steps above and the storage choice depend on the answer.
+### 8.4 Server — answered (19 Nov 2026)
+The gateway backend runs on **VPS2** (24 GB RAM) next to every product backend and their
+lazy-loaded agents; CloudPanel is installed there but unused, deploys are by command line.
+VPS1 (12 GB) keeps the sites and dashboards.
+- Products on VPS2 call `http://127.0.0.1:8787`: no network hop, no nginx/tunnel needed. VPS1 only
+  through the allowlisted nginx file, if dashboards need it.
+- Storage: Postgres/Redis now sit on the same server, so moving to them later is cheap (own
+  database + user, no network hop). SQLite stays for now: nothing to set up, and a busy SEO agent
+  can't slow AI requests down.
+- Limits: kept at 3.5 CPU / 6 GB (AI killed first under memory pressure, `oom_score_adj 800`), so
+  lazy-loaded agents always have room. Two models at once (step 4: Qwen3-1.7B + 4B) and a larger
+  context may need ~8 GB — **owner to decide after the benchmark**, with VPS2's vCPU count (`nproc`).
+
+### 8.5 Progress on §8.2
+- Step 1 ✅ `bench/run.js` now runs realistic ~900-token MesgAI prompts and reports prompt reading
+  vs reply writing, for a new business and a returning one (`prompt_ms` added to `X-Usage`).
+- Step 3 ✅ per-business exact answer cache (see STATUS.md).
+- Step 2 → tell MesgAI: fixed part of the prompt first, changing part last (its handover §1.1
+  layout already does this if the summary + last 5 messages come after the business facts).

@@ -2,7 +2,10 @@
 
 **Stage 0 — built, not yet deployed.** Nov 2026: MesgAI handover Part 1 contract built
 (subtenants, `x-kq-*` headers, realtime pool, per-business usage/privacy, new audio formats) —
-see `GATEWAY_AUDIT.md` §7 for the handover review and the master-spec gap table. Code, tests, compose file and deploy runbook are ready;
+see `GATEWAY_AUDIT.md` §7 for the handover review and the master-spec gap table.
+19 Nov 2026: **target server is now VPS2** (24 GB, shared with all product backends; products call
+`127.0.0.1:8787`). Added the per-business answer cache (`x-kq-cache: hit|miss|off`) and a realistic
+benchmark (~900-token MesgAI prompt, prompt reading vs reply writing, new vs returning business). Code, tests, compose file and deploy runbook are ready;
 deployment to the CloudPanel VPS and the on-server acceptance checks are the next step (`DEPLOY.md`).
 
 ## What is built (spec §12 build order)
@@ -70,7 +73,7 @@ See `.env.example`.
 | Suite | Result |
 |---|---|
 | `npm --prefix gateway run typecheck` | ✅ clean (strict) |
-| `npm --prefix gateway test` (vitest) | ✅ 43 passed — queue priorities (realtime instant 503, fast jobs, batch gating), deadlines, auth, tenant/subtenant contract, subtenant limits, usage per business, settings/delete, chat + streaming, JSON schema, 503 + Retry-After, no text in logs, audio routes + formats, 422/501, health, DB migration |
+| `npm --prefix gateway test` (vitest) | ✅ 46 passed — answer cache (hit/miss/off, per business, deleted with the business), queue priorities (realtime instant 503, fast jobs, batch gating), deadlines, auth, tenant/subtenant contract, subtenant limits, usage per business, settings/delete, chat + streaming, JSON schema, 503 + Retry-After, no text in logs, audio routes + formats, 422/501, health, DB migration |
 | `pytest services/speech` | ✅ 15 passed (fake model + real decoding of wav 8/16/44.1 kHz, ogg/opus, mp3, m4a, webm) |
 | `pytest services/tts` | ✅ 16 passed (fake voice; real ffmpeg for ogg_opus/mp3/mulaw_8k/pcm_16k; Urdu→Devanagari) |
 | `npm --prefix sdk test`, `npm --prefix evals test` | ✅ 5 + 4 passed |
@@ -84,14 +87,23 @@ Not run yet — needs the real server. `node bench/run.js` fills this in.
 <!-- BENCH:END -->
 
 <!-- BENCH:HISTORY (newest first) -->
-| date (UTC) | model | eval rate tok/s | est. replies/min | est. businesses | load p95 |
-|---|---|---|---|---|---|
+| date (UTC) | model | eval rate tok/s | est. replies/min | est. businesses | realistic reply new / returning | load p95 |
+|---|---|---|---|---|---|---|
 
 Estimate before measuring (spec §5): 8–15 tok/s → 3–6 replies/min → ~20–30 active businesses.
 
+## Answer cache (master spec §5, exact match only)
+Tasks with `cache_ttl_s` in `config/tasks.yaml` and temperature ≤ 0.3: `classify.safety`,
+`classify.intent` (7 days), `extract.order`, `extract.invoice` (1 day — shorter than the master
+spec's 30 days because orders contain names/addresses). Replies are never cached.
+Per business (`x-kq-subtenant`), off with `x-kq-cache: off` or the business's `allow_cache: false`.
+Only a sha256 of the request is stored, never the prompt; answers expire and are removed by
+`DELETE /v1/subtenants/:id/data`. Response header `x-kq-cache`; hits cost 0 tokens and show as
+`cache_hits` in `/v1/usage`.
+
 ## Owner manual steps (see DEPLOY.md)
 1. Approve/do: Docker (if missing), 4 GB swap file.
-2. Create product keys; fill `.env` (`PRODUCT_KEYS`, `ALLOWED_IPS` with the Windows VPS IP, `TZ`).
+2. Create product keys (MesgAI's as product `mesgai`); fill `.env` (`PRODUCT_KEYS`, `ALLOWED_IPS`, `TZ`).
 3. Run the `setup` profile once (downloads Qwen3-4B, Whisper small, Piper voices).
 4. **Read each Piper voice MODEL_CARD** and set `licence_checked: true` (or disable the language).
 5. Choose exposure: new nginx file (`nginx -t` then reload) **or** Cloudflare Tunnel + Access.
@@ -116,4 +128,6 @@ Estimate before measuring (spec §5): 8–15 tok/s → 3–6 replies/min → ~20
 - Not built from the handover yet: voice cloning (needs licence-checked models), `/v1/translate`,
   live-call streaming (Part 4), the 8 kHz WER report. Master-spec router/ledger costs/cache: see `GATEWAY_AUDIT.md`.
 - Safety in 1.5 s on the Stage 0 CPU is unproven — expect 503s (keyword filter) until benchmarked.
+- Limits are still 3.5 CPU / 6 GB from the first server. VPS2 has 24 GB but shares it with every
+  backend; raising them needs the owner's written OK after the benchmark (see GATEWAY_AUDIT §8.4).
 - Tests need Node 22 (vitest 5); the gateway itself runs on Node 20+ (the image uses Node 22).

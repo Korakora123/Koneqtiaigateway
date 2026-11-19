@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { Deps } from '../deps.js';
 import { GatewayError } from '../errors.js';
 import { acquireSlot, resolveTask, withSlot, type ResolvedTask } from '../context.js';
+import { cacheKey } from '../cache.js';
 import { ThinkFilter, type OllamaChatRequest, type OllamaMessage } from '../backends/ollama.js';
 
 const TextPart = z.object({ type: z.literal('text'), text: z.string() });
@@ -122,7 +123,13 @@ export function prepareChat(body: ChatBodyT, task: ResolvedTask, deps: Deps): Pr
         num_ctx: maxCtx,
         num_predict: numPredict,
         ...(model.num_thread ? { num_thread: model.num_thread } : {}),
-        ...(body.temperature !== undefined ? { temperature: body.temperature } : format ? { temperature: 0 } : {}),
+        ...(body.temperature !== undefined
+          ? { temperature: body.temperature }
+          : task.cfg.temperature !== undefined
+            ? { temperature: task.cfg.temperature }
+            : format
+              ? { temperature: 0 }
+              : {}),
         ...(body.top_p !== undefined ? { top_p: body.top_p } : {}),
         ...(body.seed !== undefined ? { seed: body.seed } : {}),
         ...(stop ? { stop } : {}),
@@ -152,20 +159,48 @@ export interface ChatOutcome {
   tokensOut: number;
 }
 
-/** Non-streaming chat through the llm pool. Shared with /v1/safety/classify. */
-export async function runChat(req: FastifyRequest, deps: Deps, task: ResolvedTask, prepared: PreparedChat): Promise<ChatOutcome> {
-  const out = await withSlot(req, deps, deps.pools.llm, task, (signal) => deps.ollama.chat(prepared.ollama, signal));
+/**
+ * Whether this request may use the per-business answer cache: task has a TTL, the answer is
+ * (near-)deterministic, the caller didn't send `x-kq-cache: off` and the business allows caching.
+ */
+function cacheMode(req: FastifyRequest, deps: Deps, task: ResolvedTask, prepared: PreparedChat): 'use' | 'off' | '' {
+  if (!task.cfg.cache_ttl_s) return '';
+  const temp = prepared.ollama.options.temperature;
+  if (temp === undefined || temp > 0.3) return '';
+  if (String(req.headers['x-kq-cache'] ?? '').toLowerCase() === 'off') return 'off';
   const ctx = req.ctx;
+  if (!deps.usage.getSettings(ctx.product!, ctx.subtenant ?? 'system').allow_cache) return 'off';
+  return 'use';
+}
+
+/** Non-streaming chat through the llm pool (with the answer cache). Shared with /v1/safety/classify. */
+export async function runChat(req: FastifyRequest, deps: Deps, task: ResolvedTask, prepared: PreparedChat): Promise<ChatOutcome> {
+  const ctx = req.ctx;
+  const mode = cacheMode(req, deps, task, prepared);
+  const sub = ctx.subtenant ?? 'system';
+  const key = mode === 'use' ? cacheKey({ task: task.name, req: { ...prepared.ollama, keep_alive: undefined } }) : '';
+  if (mode === 'use') {
+    const hit = deps.cache.get(ctx.product!, sub, key);
+    if (hit) {
+      ctx.cache = 'hit';
+      return { content: hit.content, finishReason: 'stop', tokensIn: 0, tokensOut: 0 };
+    }
+    ctx.cache = 'miss';
+  } else if (mode === 'off') {
+    ctx.cache = 'off';
+  }
+
+  const out = await withSlot(req, deps, deps.pools.llm, task, (signal) => deps.ollama.chat(prepared.ollama, signal));
   ctx.tokensIn = out.tokensIn;
   ctx.tokensOut = out.tokensOut;
   ctx.evalMs = out.evalMs;
+  ctx.promptMs = out.promptMs;
   if (prepared.wantsJson) checkJsonOutput(out.content, prepared.schema);
-  return {
-    content: out.content,
-    finishReason: out.doneReason === 'length' ? 'length' : 'stop',
-    tokensIn: out.tokensIn,
-    tokensOut: out.tokensOut,
-  };
+  const finishReason = out.doneReason === 'length' ? 'length' : 'stop';
+  if (mode === 'use' && finishReason === 'stop' && out.content) {
+    deps.cache.put(ctx.product!, sub, key, task.name, { content: out.content, tokensIn: out.tokensIn, tokensOut: out.tokensOut }, task.cfg.cache_ttl_s);
+  }
+  return { content: out.content, finishReason, tokensIn: out.tokensIn, tokensOut: out.tokensOut };
 }
 
 function usageObj(i: number, o: number): { prompt_tokens: number; completion_tokens: number; total_tokens: number } {
@@ -229,6 +264,7 @@ export function registerChat(app: FastifyInstance, deps: Deps): void {
             ctx.tokensIn = c.prompt_eval_count ?? 0;
             ctx.tokensOut = c.eval_count ?? 0;
             ctx.evalMs = Math.round((c.eval_duration ?? 0) / 1e6);
+            ctx.promptMs = Math.round((c.prompt_eval_duration ?? 0) / 1e6);
             chunk({}, c.done_reason === 'length' ? 'length' : 'stop');
             if (body.stream_options?.include_usage) {
               sse({ id, object: 'chat.completion.chunk', created, model, choices: [], usage: usageObj(ctx.tokensIn, ctx.tokensOut) });

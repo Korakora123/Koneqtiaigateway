@@ -149,7 +149,7 @@ describe('POST /v1/chat/completions', () => {
     const bad = await h.app.inject({
       method: 'POST',
       url: '/v1/chat/completions',
-      headers: authHeaders('extract.order'),
+      headers: authHeaders('extract.order', { 'x-kq-cache': 'off' }), // identical request would be a cache hit
       payload: { messages, response_format: { type: 'json_schema', json_schema: { name: 'order', schema } } },
     });
     expect(bad.statusCode).toBe(502);
@@ -472,5 +472,63 @@ describe('tenant / subtenant contract (master §11.1, handover §0–1)', () => 
     h = await harness();
     const r = await h.app.inject({ method: 'POST', url: '/v1/safety/classify', headers: authHeaders(), payload: { text: 'a'.repeat(1001) } });
     expect(r.statusCode).toBe(413);
+  });
+});
+
+describe('per-business answer cache (master §5)', () => {
+  const classify = (sub: string, extra: Record<string, string> = {}) =>
+    h.app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: authHeaders('classify.intent', { 'x-kq-subtenant': sub, ...extra }),
+      payload: { messages: [{ role: 'user', content: 'order kab aayega? SECRET-CACHE-PROMPT' }] },
+    });
+
+  it('second identical request is a hit: no model call, 0 tokens, same answer', async () => {
+    h = await harness();
+    h.ollama.handler = ollamaReply('order_status');
+    const a = await classify('biz-1');
+    expect(a.headers['x-kq-cache']).toBe('miss');
+    const calls = h.ollama.requests.length;
+    const b = await classify('biz-1');
+    expect(b.statusCode).toBe(200);
+    expect(b.headers['x-kq-cache']).toBe('hit');
+    expect(b.headers['x-kq-usage-tokens']).toBe('0');
+    expect(b.json().choices[0].message.content).toBe('order_status');
+    expect(h.ollama.requests.length).toBe(calls); // model not called
+    expect(h.ollama.lastJson<{ options: { temperature: number } }>().options.temperature).toBe(0); // task default
+    expect(h.deps.usage.byTask('mesgai', 0, Date.now() + 1, 'biz-1')['classify.intent']).toMatchObject({ calls: 2, cache_hits: 1 });
+    // the prompt is never stored, only a hash
+    const rows = h.deps.usage.db.prepare('SELECT * FROM cache_entries').all();
+    expect(JSON.stringify(rows)).not.toContain('SECRET-CACHE-PROMPT');
+  });
+
+  it('never shared between businesses; off by header or by business setting; deleted with the business', async () => {
+    h = await harness();
+    h.ollama.handler = ollamaReply('x');
+    await classify('biz-1');
+    expect((await classify('biz-2')).headers['x-kq-cache']).toBe('miss');
+    expect((await classify('biz-1', { 'x-kq-cache': 'off' })).headers['x-kq-cache']).toBe('off');
+    h.deps.usage.putSettings('mesgai', 'biz-3', { retention_days: 0, allow_cache: false });
+    await classify('biz-3');
+    expect((await classify('biz-3')).headers['x-kq-cache']).toBe('off');
+    const del = await h.app.inject({ method: 'DELETE', url: '/v1/subtenants/biz-1/data', headers: { authorization: authHeaders().authorization! } });
+    expect(del.json().removed.cache_entries).toBe(1);
+    expect((await classify('biz-1')).headers['x-kq-cache']).toBe('miss');
+  });
+
+  it('replies (temperature 0.4, no TTL) are never cached', async () => {
+    h = await harness();
+    const send = () =>
+      h.app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: authHeaders('reply'),
+        payload: { temperature: 0.4, messages: [{ role: 'user', content: 'x' }] },
+      });
+    await send();
+    const r = await send();
+    expect(r.headers['x-kq-cache']).toBeUndefined();
+    expect(h.ollama.requests.filter((q) => q.url === '/api/chat').length).toBe(2);
   });
 });

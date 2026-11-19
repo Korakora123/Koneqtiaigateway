@@ -10,7 +10,7 @@ Tokofy, e-invoice, BlogBot, PinForge). Local models only: no external AI APIs.
 - MesgAI contract: [`MESGAI_GATEWAY_HANDOVER.md`](MESGAI_GATEWAY_HANDOVER.md)
 
 ```
-Windows VPS (brains) ──nginx allowlist / CF tunnel──► gateway :8787 (127.0.0.1 only)
+VPS2 product backends ──http://127.0.0.1:8787──► gateway (127.0.0.1 only)   [VPS1 only via nginx allowlist]
                                                         ├─ ollama   qwen3:4b (Q4)       ┐ internal
                                                         ├─ speech   faster-whisper small ├ network,
                                                         └─ tts      Piper                ┘ no internet

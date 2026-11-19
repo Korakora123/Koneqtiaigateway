@@ -30,6 +30,7 @@ export interface OllamaChatChunk {
   prompt_eval_count?: number;
   eval_count?: number;
   eval_duration?: number;
+  prompt_eval_duration?: number;
   error?: string;
 }
 
@@ -40,6 +41,8 @@ export interface OllamaResult {
   tokensOut: number;
   /** Pure generation time reported by Ollama (eval_duration) — used by bench/ for eval rate. */
   evalMs: number;
+  /** Prompt-reading (prefill) time — on CPU often the biggest part of a reply. */
+  promptMs: number;
 }
 
 /** Removes a leading Qwen3 `<think>…</think>` block if the runtime still emits one. */
@@ -131,6 +134,7 @@ export class OllamaClient {
       tokensIn: data.prompt_eval_count ?? 0,
       tokensOut: data.eval_count ?? 0,
       evalMs: Math.round((data.eval_duration ?? 0) / 1e6),
+      promptMs: Math.round((data.prompt_eval_duration ?? 0) / 1e6),
     };
   }
 

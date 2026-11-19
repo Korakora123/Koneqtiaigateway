@@ -24,8 +24,9 @@ function subtenantParam(params: unknown): string {
  * Per-business privacy controls (master spec §11.1, handover §1.6). A key only ever reaches
  * subtenants of its own tenant: every query is scoped by the key's product.
  *
- * Stage 0 stores no message content, cache or voices at all, so `retention_days` is recorded
- * for later features (cache, transcripts) and DELETE removes the ledger rows + settings.
+ * The gateway keeps no prompts, transcripts or audio. It keeps metadata (ledger) and, for
+ * cacheable tasks, cached answers. DELETE removes ledger rows, cached answers and settings.
+ * `retention_days` is recorded for later features (stored transcripts).
  */
 export function registerSubtenants(app: FastifyInstance, deps: Deps): void {
   app.get('/v1/subtenants/:id/settings', async (req) => {
@@ -43,8 +44,8 @@ export function registerSubtenants(app: FastifyInstance, deps: Deps): void {
 
   app.delete('/v1/subtenants/:id/data', async (req) => {
     const id = subtenantParam(req.params);
-    const removed = deps.usage.deleteSubtenant(req.ctx.product!, id);
+    const removed = { ...deps.usage.deleteSubtenant(req.ctx.product!, id), cache_entries: deps.cache.deleteSubtenant(req.ctx.product!, id) };
     req.log.info({ product: req.ctx.product, subtenant: id, ...removed }, 'subtenant data deleted');
-    return { ok: true, removed: { ...removed, voices: 0, cache_entries: 0 } };
+    return { ok: true, removed: { ...removed, voices: 0 } };
   });
 }

@@ -4,6 +4,7 @@ import type { KeyStore, IpAllowList } from './auth.js';
 import type { RateLimiter } from './ratelimit.js';
 import type { PriorityPool } from './queue/pool.js';
 import type { UsageStore } from './usage.js';
+import type { AnswerCache } from './cache.js';
 import type { Metrics } from './metrics.js';
 import type { OllamaClient } from './backends/ollama.js';
 import type { SpeechClient, TtsClient } from './backends/audio.js';
@@ -16,6 +17,7 @@ export interface Deps {
   rateLimiter: RateLimiter;
   pools: { llm: PriorityPool; speech: PriorityPool; tts: PriorityPool };
   usage: UsageStore;
+  cache: AnswerCache;
   metrics: Metrics;
   ollama: OllamaClient;
   speech: SpeechClient;

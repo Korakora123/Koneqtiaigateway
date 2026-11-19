@@ -1,8 +1,12 @@
-# DEPLOY.md — Stage 0 on the shared CloudPanel VPS
+# DEPLOY.md — Stage 0 on VPS2 (shared backend server)
 
-Target: Linux VPS, 6 vCPU / 12 GB, CloudPanel with live WordPress sites.
+Target: **VPS2** — Linux, 24 GB RAM, shared with every Koneqti product backend and their
+lazy-loaded agents (KoneqtiSEO with Postgres/Redis/ClickHouse, MesgAI brain, …). CloudPanel is
+installed but not used. VPS1 (12 GB) keeps the sites and dashboards.
+Products on VPS2 call the gateway on `http://127.0.0.1:8787` — no nginx or tunnel needed for them.
+Step 8 (nginx / tunnel) is only for callers on another server, e.g. VPS1 dashboards.
 Everything below either **adds new files** or runs **inside Docker**. Nothing touches
-CloudPanel, MySQL, PHP-FPM, existing sites or existing nginx configs.
+CloudPanel, other products' services or databases, existing sites or existing nginx configs.
 
 > Owner approval needed before step 1 (installing Docker, if it isn't there) and step 2 (swap file).
 > Both are one-time host changes. Everything else is containers + new files.
@@ -15,7 +19,9 @@ free -h; nproc; df -h /                 # need ~15 GB free disk (images + models
 docker --version && docker compose version   # Docker Engine 24+ with compose v2
 stat -fc %T /sys/fs/cgroup              # cgroup2fs = cgroup v2 (recommended)
 ```
-Write down 3 site URLs for the spot-checks, and the **public IP of the Windows VPS**.
+Write down 3 health URLs of other product backends on VPS2 for the spot-checks (e.g.
+`http://127.0.0.1:<port>/health` of KoneqtiSEO, MesgAI brain), and VPS1's IP if dashboards
+there must call the gateway. Note the vCPU count: `nproc`.
 
 ## 1. Docker (only if missing — owner approval)
 Install Docker Engine from docker.com's official repo for your distro. Do not upgrade the OS.
@@ -45,7 +51,11 @@ docker run --rm -v "$PWD/gateway/scripts:/s" node:22-bookworm-slim node /s/gen-k
 ```
 Edit `.env`:
 - `PRODUCT_KEYS='{"mesgai":"<hash>","tokofy":"<hash>","bench":"<hash>"}'`
-- `ALLOWED_IPS=127.0.0.1,172.31.87.1,<WINDOWS_VPS_IP>`
+- `ALLOWED_IPS=127.0.0.1,172.31.87.1` (+ `<VPS1_IP>` only if VPS1 calls through step 8)
+- Product backends that run **in Docker** on VPS2 reach the gateway via
+  `extra_hosts: ["host.docker.internal:host-gateway"]` → `http://host.docker.internal:8787`;
+  add their docker network's gateway IP (e.g. `172.18.0.1`) to `ALLOWED_IPS` and `TRUST_PROXY`.
+  Backends run directly on the host (node/PM2) need nothing extra.
 - `TZ=` your server's timezone (off-peak window uses it), `OFFPEAK_WINDOW=01:00-07:00`
 - If `172.31.87.0/24` is already used by another docker network (`docker network ls`,
   `ip route`), change `AI_EDGE_SUBNET` and the two `172.31.87.1` entries.
@@ -87,14 +97,14 @@ curl -s http://127.0.0.1:8787/v1/chat/completions \
 docker compose logs gateway | tail -3  # metadata only — no message text
 ```
 
-## 8. Expose privately to the Windows VPS (pick ONE)
+## 8. Only if another server must call it (e.g. VPS1 dashboards) — pick ONE
 **A. nginx — new file only**
 ```bash
 sudo cp ops/nginx/koneqti-ai-gateway.conf /etc/nginx/sites-enabled/koneqti-ai-gateway.conf
-sudo nano /etc/nginx/sites-enabled/koneqti-ai-gateway.conf   # server_name, cert paths, allow <WINDOWS_VPS_IP>
+sudo nano /etc/nginx/sites-enabled/koneqti-ai-gateway.conf   # server_name, cert paths, allow <VPS1_IP>
 sudo nginx -t && sudo systemctl reload nginx                  # never restart
 ```
-Open port 8443 in the firewall **for the Windows VPS IP only**.
+Open port 8443 in the firewall **for VPS1's IP only**.
 CloudPanel may keep its nginx vhosts elsewhere — check with `nginx -T | grep -n "include"`
 and put the file in a directory that is already included, without editing any existing file.
 
@@ -103,7 +113,7 @@ and put the file in a directory that is already included, without editing any ex
 ## 9. Acceptance checks (spec §13) — record results in STATUS.md
 | # | How |
 |---|---|
-| 1 | `SITE_URLS="https://a https://b https://c" scripts/sites-check.sh` idle, then again during step 10's load test |
+| 1 | `SITE_URLS="http://127.0.0.1:<seo-port>/health http://127.0.0.1:<brain-port>/health …" scripts/sites-check.sh` idle, then again during step 10's load test — other backends on VPS2 must stay normal |
 | 2 | `scripts/check-limits.sh --watch` during the load test |
 | 3 | `scripts/memory-pressure-test.sh speech` |
 | 4 | step 7 + `docker compose logs gateway` shows no text |
@@ -131,7 +141,7 @@ Add monitors (Kuma can run anywhere that reaches these URLs):
   (Kuma's IP must be in the nginx allow list and `ALLOWED_IPS`), interval 60 s.
 - HTTP(s) – Keyword: `"alerts":[]` on the same URL → warns on `host_ram_above_85pct`,
   `reply_p95_above_20s`, `speech_down`, `tts_down`.
-- One HTTP monitor per CloudPanel site (response-time alert above its normal baseline).
+- One HTTP monitor per product backend on VPS2 (response-time alert above its normal baseline).
 Prometheus can scrape `/metrics` (same allowlist).
 
 ## 12. Operations
@@ -149,4 +159,4 @@ Create MesgAI's key as product `mesgai` (it sends `X-Tenant-Id: mesgai`, which m
 In the brain's env: `AI_GATEWAY_URL=https://ai.example.com:8443`, `AI_GATEWAY_KEY=<mesgai key>`,
 `USE_AI_GATEWAY=true` (keep the old `OLLAMA_URL`/`WHISPER_URL`/… until verified). Use
 `sdk/` (`@koneqti/ai`): on `BusyError` send the reviewed holding reply; for safety, fall back to
-the keyword filter. After a week without problems stop Ollama/Whisper on the Windows VPS.
+the keyword filter. After a week without problems remove MesgAI's own Ollama/Whisper/voice-engine.

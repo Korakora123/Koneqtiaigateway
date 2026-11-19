@@ -9,6 +9,7 @@ import { RateLimiter } from './ratelimit.js';
 import { PriorityPool } from './queue/pool.js';
 import { isOffPeak } from './queue/offpeak.js';
 import { UsageStore } from './usage.js';
+import { AnswerCache } from './cache.js';
 import { Metrics } from './metrics.js';
 import { OllamaClient } from './backends/ollama.js';
 import { SpeechClient, TtsClient } from './backends/audio.js';
@@ -49,6 +50,7 @@ export function buildDeps(env: Env, files: FileConfig, now: () => Date = () => n
     });
   // llm general + reserved slots must match what Ollama really runs in parallel.
   const llmSlots = env.OLLAMA_NUM_PARALLEL !== undefined ? Math.max(1, env.OLLAMA_NUM_PARALLEL - L.pools.llm.reserved_realtime) : L.pools.llm.slots;
+  const usage = new UsageStore(env.USAGE_DB_PATH);
   const pools = { llm: pool('llm', llmSlots), speech: pool('speech', L.pools.speech.slots), tts: pool('tts', L.pools.tts.slots) };
   return {
     env,
@@ -57,7 +59,8 @@ export function buildDeps(env: Env, files: FileConfig, now: () => Date = () => n
     allowList: new IpAllowList(env.ALLOWED_IPS),
     rateLimiter: new RateLimiter(L.rate_limits),
     pools,
-    usage: new UsageStore(env.USAGE_DB_PATH),
+    usage,
+    cache: new AnswerCache(usage.db),
     metrics: new Metrics(Object.values(pools)),
     ollama: new OllamaClient(env.OLLAMA_URL),
     speech: new SpeechClient(env.SPEECH_URL),
@@ -128,11 +131,12 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
     reply.header('x-request-id', ctx.requestId);
     if (!reply.hasHeader('x-model-used')) reply.header('x-model-used', ctx.model);
     reply.header('x-kq-model', ctx.model);
+    if (ctx.cache) reply.header('x-kq-cache', ctx.cache);
     if (!reply.hasHeader('x-queue-ms')) reply.header('x-queue-ms', String(ctx.queueMs));
     if (!reply.hasHeader('x-usage')) reply.header('x-usage', usageHeader(ctx));
     // Handover §0: numbers the product writes into its own per-business ledger.
     // (Streams carry usage in their last SSE chunk instead — the header is sent before it is known.)
-    if (!ctx.stream && (ctx.tokensIn || ctx.tokensOut)) reply.header('x-kq-usage-tokens', String(usageTokens(ctx)));
+    if (!ctx.stream && (ctx.tokensIn || ctx.tokensOut || ctx.cache === 'hit')) reply.header('x-kq-usage-tokens', String(usageTokens(ctx)));
     if (ctx.audioSeconds) reply.header('x-kq-usage-audio-sec', ctx.audioSeconds.toFixed(2));
     return payload;
   });
@@ -174,6 +178,7 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
           audio_seconds: ctx.audioSeconds,
           chars: ctx.chars,
           stream: ctx.stream ? 1 : 0,
+          cache: ctx.cache,
         });
         if (ctx.subtenant) deps.usage.touchSubtenant(ctx.product, ctx.subtenant);
       } catch (err) {
@@ -238,9 +243,12 @@ export async function buildApp(opts: BuildOptions): Promise<{ app: FastifyInstan
   sweeper.unref();
   const pruner = setInterval(() => deps.usage.prune(env.USAGE_RETENTION_DAYS), 86_400_000);
   pruner.unref();
+  const cachePruner = setInterval(() => deps.cache.pruneExpired(), 3_600_000);
+  cachePruner.unref();
   app.addHook('onClose', async () => {
     clearInterval(sweeper);
     clearInterval(pruner);
+    clearInterval(cachePruner);
     for (const p of Object.values(deps.pools)) p.close();
     deps.usage.close();
   });

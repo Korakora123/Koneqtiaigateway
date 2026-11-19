@@ -22,6 +22,8 @@ export interface UsageRecord {
   audio_seconds: number;
   chars: number;
   stream: number;
+  /** hit | miss | off | '' (not cacheable) */
+  cache: string;
 }
 
 export interface TaskUsage {
@@ -34,6 +36,7 @@ export interface TaskUsage {
   audio_sec: number;
   chars: number;
   avg_latency_ms: number;
+  cache_hits: number;
 }
 
 export interface SubtenantSettings {
@@ -44,7 +47,7 @@ export interface SubtenantSettings {
 export const DEFAULT_SETTINGS: SubtenantSettings = { retention_days: 0, allow_cache: true };
 
 export class UsageStore {
-  private readonly db: Database.Database;
+  readonly db: Database.Database;
   private readonly insertStmt: Database.Statement;
   private readonly touchStmt: Database.Statement;
 
@@ -56,9 +59,9 @@ export class UsageStore {
     this.migrate();
     this.insertStmt = this.db.prepare(`
       INSERT INTO usage (ts, request_id, product, subtenant, task, model, priority, status, error_code,
-                         queue_ms, latency_ms, tokens_in, tokens_out, audio_seconds, chars, stream)
+                         queue_ms, latency_ms, tokens_in, tokens_out, audio_seconds, chars, stream, cache)
       VALUES (@ts, @request_id, @product, @subtenant, @task, @model, @priority, @status, @error_code,
-              @queue_ms, @latency_ms, @tokens_in, @tokens_out, @audio_seconds, @chars, @stream)`);
+              @queue_ms, @latency_ms, @tokens_in, @tokens_out, @audio_seconds, @chars, @stream, @cache)`);
     this.touchStmt = this.db.prepare(
       `INSERT OR IGNORE INTO subtenants (product, subtenant, retention_days, allow_cache, created_at, updated_at)
        VALUES (?, ?, 0, 1, ?, ?)`,
@@ -89,7 +92,8 @@ export class UsageStore {
         tokens_out    INTEGER NOT NULL DEFAULT 0,
         audio_seconds REAL    NOT NULL DEFAULT 0,
         chars         INTEGER NOT NULL DEFAULT 0,
-        stream        INTEGER NOT NULL DEFAULT 0
+        stream        INTEGER NOT NULL DEFAULT 0,
+        cache         TEXT    NOT NULL DEFAULT ''
       );
       CREATE INDEX IF NOT EXISTS usage_product_ts ON usage (product, ts);
       CREATE INDEX IF NOT EXISTS usage_subtenant_ts ON usage (product, subtenant, ts);
@@ -103,6 +107,8 @@ export class UsageStore {
         PRIMARY KEY (product, subtenant)
       );
     `);
+    const after = this.db.prepare(`PRAGMA table_info(usage)`).all() as Array<{ name: string }>;
+    if (!after.some((c) => c.name === 'cache')) this.db.exec(`ALTER TABLE usage ADD COLUMN cache TEXT NOT NULL DEFAULT ''`);
   }
 
   record(r: UsageRecord): void {
@@ -124,7 +130,7 @@ export class UsageStore {
         `SELECT task, COUNT(*) AS calls, SUM(status >= 400) AS errors, SUM(status = 503) AS busy,
                 SUM(tokens_in) AS tokens_in, SUM(tokens_out) AS tokens_out,
                 ROUND(SUM(audio_seconds), 1) AS audio_sec, SUM(chars) AS chars,
-                CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms
+                CAST(AVG(latency_ms) AS INTEGER) AS avg_latency_ms, SUM(cache = 'hit') AS cache_hits
          FROM usage WHERE ${where} GROUP BY task ORDER BY task`,
       )
       .all(...args) as Array<Omit<TaskUsage, 'tokens'> & { task: string }>;
